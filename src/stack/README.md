@@ -18,7 +18,7 @@ Subsystem status is maintained through bit-packed state representation.
 
 ---
 
-##Implemented Componenets
+## Implemented Componenets
 
 - Mission Manager
 - MIssion GUI
@@ -26,7 +26,7 @@ Subsystem status is maintained through bit-packed state representation.
 
 ---
 
-##Planned Components
+## Planned Components
 
 - Waypoint Nav
 - Vision
@@ -35,7 +35,7 @@ Subsystem status is maintained through bit-packed state representation.
 
 ---
 
-##Tech Stack
+## Tech Stack
 
 - ROS2 Humble
 - PX4 Autopilot firmware v1.17.0
