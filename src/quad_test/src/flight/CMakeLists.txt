@@ -14,7 +14,7 @@ find_package(Eigen3 REQUIRED)
 
 add_executable(flight_test src/flight_test.cpp)
 
-ament_target_dependencies(flight_test rclpp px4_msgs geometry_msgs)
+ament_target_dependencies(flight_test rclcpp px4_msgs geometry_msgs)
 target_include_directories(flight_test PUBLIC ${EIGEN3_INCLUDE_DIRS})
 
 install(TARGETS
