@@ -23,7 +23,7 @@
 - Ascend @ altitude 3m
 - Land
 
-<video controls_width="800">
+<video controls width="800">
   <source src="materials/quad_flight_test_demo.web.m" type="video/webm">
 </video>
 
