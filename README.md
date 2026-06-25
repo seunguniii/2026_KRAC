@@ -1,2 +1,0 @@
-# 2026_KRAC
-SMWU / YU KRAC
