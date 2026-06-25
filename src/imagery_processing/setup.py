@@ -28,8 +28,6 @@ setup(
     entry_points={
         'console_scripts': [
             'marker_recognition_x500 = imagery_processing.marker_recognition_x500:main',
-            'marker_recognition_vtol = imagery_processing.marker_recognition_vtol:main',
-            'following_recognition = imagery_processing.following_recognition:main'
         ],
     },
 )
