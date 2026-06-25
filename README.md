@@ -44,8 +44,7 @@ PX4 Offboard control
 6. 현재 카메라 yaw 장착 방향을 고려해 카메라 좌표계를 기체 body 좌표계로 변환
 7. `/landing/coordinates` topic으로 publish
 8. LIDAR-Lite v3HP 거리센서 값을 PX4 distance sensor topic으로 publish
-9. SIYI A8 mini zoom 제어
-10. 디버그 영상 `/landing/video/compressed` publish
+9. 디버그 영상 `/landing/video/compressed` publish
 
 ---
 
@@ -118,24 +117,6 @@ dy_px = cy0 - cy
 ```python
 raw_x_m = dx_px / fx * z
 raw_y_m = dy_px / fy * z
-```
-
-현재 코드에서는 1x zoom과 4x zoom에 대해 각각 다른 camera matrix와 distortion coefficient를 사용한다.
-
-```python
-_CAMERA_MATRIX_1X
-_DIST_COEFFS_1X
-_CAMERA_MATRIX_4X
-_DIST_COEFFS_4X
-```
-
-현재 zoom factor가 4x에 가까우면 4x calibration을 사용하고, 그렇지 않으면 1x calibration을 사용한다.
-
-```python
-if abs(self._current_zoom_factor - 4.0) < 0.2:
-    return self._camera_matrix_4x, self._dist_coeffs_4x
-
-return self._camera_matrix_1x, self._dist_coeffs_1x
 ```
 
 ---
