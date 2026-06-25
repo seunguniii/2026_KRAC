@@ -1,14 +1,15 @@
 #include "stack_cpp/mission_manager.h"
+#include <iostream>
 
 MissionManager::MissionManager()
   : data(0)
   {}
   
-void MissionManager::set(NodeName node, NodeState state){
-  uint32_t shift = static_cast<uint32_t>(node)*BITS_PER_NODESTATE;
+void MissionManager::set(NodeName node, NodeState state) {
+  uint32_t shift =  static_cast<uint32_t>(node) * BITS_PER_NODESTATE;
 
   data &= ~(MASK_NODESTATE << shift);
-  data |= (static_cast<uint32_t>(state) << shift);
+  data |= ((static_cast<uint32_t>(state) & MASK_NODESTATE) << shift);
 }
 
 NodeState MissionManager::get(NodeName node) const {
@@ -22,6 +23,9 @@ void MissionManager::clear() {
 }
 
 uint32_t MissionManager::raw() const {
+  if (data > 0xFFFF)
+    std::cout << "CORRUPTED DATA = " << data << std::endl;
+    
   return data;
 }
 

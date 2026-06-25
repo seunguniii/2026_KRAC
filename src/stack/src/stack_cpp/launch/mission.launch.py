@@ -6,12 +6,19 @@ def generate_launch_description():
   return LaunchDescription([
     Node(
       package='stack_cpp',
-      executable='master',
-      name='master',
+      executable='mission',
+      name='mission',
       output='screen',
       emulate_tty=True
     ),
     
+    Node(
+      package='stack_cpp',
+      executable='flight',
+      name='flight',
+      output='screen',
+      emulate_tty=True
+    ),
     
     Node(
       package='stack_cpp',

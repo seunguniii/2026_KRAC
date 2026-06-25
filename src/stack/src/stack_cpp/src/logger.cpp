@@ -30,12 +30,14 @@ class Logger : public rclcpp::Node
       command_subscriber = this->create_subscription<UInt32>("mission/command", 10,
         [this](const UInt32::SharedPtr msg) {
           uint32_t cmd = msg->data;
-          if(manager.get_node(cmd) == NodeName::LOGGER) {
-            self_state = manager.get_command(cmd);
-            RCLCPP_INFO(get_logger(), "Command recieved from Master.");
+          NodeState command_state = manager.get_command(cmd);
+          if(manager.get_node(cmd) == NodeName::LOGGER && self_state != command_state) {
+            self_state = command_state;
+            RCLCPP_INFO(get_logger(), "Command recieved from MISSION.");
           }
         });
       
+      //TODO: set directory path 
       file_.open("/home/sujin/flight_log.csv");
 
       if (!file_.is_open()) {
@@ -58,7 +60,7 @@ class Logger : public rclcpp::Node
         [this](const VehicleControlMode::SharedPtr msg) {
         flight_mode_ = msg->flag_control_offboard_enabled;});
 
-      target_wp_sub_ = this->create_subscription<Int32>("nodes/wp_navigator/target_wp", 10,
+      target_wp_sub_ = this->create_subscription<Int32>("nodes/flight/target_wp", 10,
         [this](const Int32::SharedPtr msg) {
         target_wp_ = msg->data;});
 

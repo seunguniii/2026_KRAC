@@ -21,17 +21,19 @@ enum class MissionMode {
 enum class NodeState : uint32_t {
   IDLE = 0b00,
   BUSY = 0b01,
-  COMPLETED = 0b10,
-  ERROR = 0b11
+  SUCCESS = 0b10,
+  ABORT = 0b11
 };
     
 enum class NodeName {
-  MASTER = 0,
-  WP_NAVIGATOR = 1,
-  TARGET_GUIDE = 2,
+  MISSION = 0,
+  FLIGHT = 1,
+  TARGET = 2,
   GRIPPER = 3,
   VISION = 4,
-  LOGGER = 5
+  MARKER = 5,
+  YOLO = 6,
+  LOGGER = 7
 };
 
 class MissionManager{
