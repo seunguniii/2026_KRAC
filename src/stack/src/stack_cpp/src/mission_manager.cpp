@@ -4,7 +4,8 @@
 MissionManager::MissionManager()
   : data(0)
   {}
-  
+
+//sets node state
 void MissionManager::set(NodeName node, NodeState state) {
   uint32_t shift =  static_cast<uint32_t>(node) * BITS_PER_NODESTATE;
 
@@ -12,6 +13,7 @@ void MissionManager::set(NodeName node, NodeState state) {
   data |= ((static_cast<uint32_t>(state) & MASK_NODESTATE) << shift);
 }
 
+//gets node state
 NodeState MissionManager::get(NodeName node) const {
   uint32_t shift = static_cast<uint32_t>(node)*BITS_PER_NODESTATE;
   
@@ -36,10 +38,12 @@ uint32_t MissionManager::pack(NodeName node, NodeState state){
   return (node_bits << BITS_PER_NODESTATE) | state_bits;
 }
 
+//gets target node from command
 NodeName MissionManager::get_node(uint32_t cmd){
   return static_cast<NodeName>((cmd >> BITS_PER_NODESTATE) & MASK_NODE);
 }
 
+//gets command from command
 NodeState MissionManager::get_command(uint32_t cmd){
   return static_cast<NodeState>(cmd & MASK_NODESTATE);
 }

@@ -20,20 +20,19 @@ class Vision(Node):
     super().__init__('vision')
     
     self.status_publisher = self.create_publisher(UInt32, "/nodes/vision/status", 10)
-    self.image_publisher = self.create_publisher(CompressedImage, "/vision/compressed", 10)
+    self.image_publisher = self.create_publisher(CompressedImage, "/nodes/vision/stream", 10)
     
-    self.command_sub = self.create_subscription(
+    self.command_subscriber = self.create_subscription(
       UInt32, "/mission/command", self.command_callback, 10
     )
     
-    #local debug stream
-    #self._cap = self.open_camera()
-    #FPS = 30.0
+    self._cap = self.open_camera()
+    FPS = 30.0
 
     self.mm = MissionManager()
     self.self_state = NodeState.IDLE
     
-    self.timer = self.create_timer(1.0/FPS, self.callback_stream)
+    self.timer = self.create_timer(1.0/FPS, self.main_callback)
       
 
 
@@ -45,9 +44,7 @@ class Vision(Node):
     command = self.mm.get_command(cmd)
     if command != self.self_state:
         self.self_state = command
-        self.get_logger().info(
-            f"State changed to {command.name}"
-        )
+        self.get_logger().info("Command recieved from MISSION")
 
 
   def report_status(self):
@@ -61,7 +58,8 @@ class Vision(Node):
     self.status_publisher.publish(msg)
 
 
-  def callback_stream(self):
+  #main logic
+  def main_callback(self):
     self.report_status()
 
     if self.self_state != NodeState.BUSY:
@@ -73,6 +71,7 @@ class Vision(Node):
       return
   
     ret, frame = self._cap.read()
+    
     if not ret:
       self.self_state = NodeState.ERROR
       self.get_logger().error("Frame grab failed.")
@@ -86,8 +85,9 @@ class Vision(Node):
       msg.data = encoded.tobytes()
       self.image_publisher.publish(msg)
 
-    cv2.imshow("Drone View", frame)
-    cv2.waitKey(1)
+    #local debug
+    #cv2.imshow("Drone View", frame)
+    #cv2.waitKey(1)
 
 
   def stop(self):

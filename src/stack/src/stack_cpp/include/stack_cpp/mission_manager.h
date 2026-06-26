@@ -4,17 +4,12 @@
 
 enum class MissionMode {
   IDLE = 0,
-  TAKEOFF = 1,
-  TRANSITION_2_FW = 2,
-  WP_FLIGHT = 3,
-  TRANSITION_2_MC = 4,
-  RESCUE = 5,
-  //TRANSITION_2_FW = 1,
-  INVERSE_WP_FLIGHT = 6,
-  //TRANSITION_2_MC = 3,
-  DROP = 7,
-  LANDING = 8,
-  FINISHED = 9,
+  WP_FLIGHT = 1,
+  RESCUE = 2,
+  INVERSE_WP_FLIGHT = 3,
+  DROP = 4,
+  LANDING = 5,
+  FINISHED = 6,
   ABORT = 100
 };
     

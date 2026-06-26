@@ -46,11 +46,11 @@ class Flight : public rclcpp::Node {
           }
         });
 
-
+      //main logic
       auto timer_callback = [this]() -> void {
         reportNodeStatus(self_state);
         
-        if(self_state != NodeState::BUSY)
+        if(self_state != NodeState::BUSY && self_state != NodeState::SUCCESS)
           return;
           
         if(flight_mode_ == STANDBY) {
@@ -89,14 +89,15 @@ class Flight : public rclcpp::Node {
     FlightMode flight_mode_ = STANDBY;
 
     std::vector<std::array<float,3>> waypoints_ = {
-      {0.0f, 0.0f, -25.0f},
-      {100.0f, 0.0f, -25.0f},
-      {200.0f, 100.0f, -25.0f},
-      {200.0f, -100.0f, -25.0f},
-      {100.0f, 0.0f, -25.0f},
-      {0.0f, 0.0f, -25.0f},
-      {0.0f, 0.0f, 0.0f}
+      {0.0f, 0.0f, -10.0f},
+      {100.0f, 0.0f, -10.0f},
+      {200.0f, 100.0f, -10.0f},
+      {200.0f, -100.0f, -10.0f},
+      {100.0f, 0.0f, -10.0f},
+      {0.0f, 0.0f, -10.0f}
     };
+    std::array<float,3>hold_position_ = waypoints_.back();
+    bool holding_last_wp_ = false;
 
     uint64_t offboard_setpoint_counter_ {0};
     size_t wp_idx_ {0};
@@ -134,46 +135,71 @@ void Flight::reportNodeStatus(NodeState state) {
 void Flight::publishTrajectorySetpoint() {
   TrajectorySetpoint msg {};
 
-  auto &wp = waypoints_[wp_idx_];
-
   Eigen::Vector3f current(curr_odom_.position[0], curr_odom_.position[1], curr_odom_.position[2]);
-  Eigen::Vector3f target(wp[0], wp[1], wp[2]);
+  
+  std::array<float,3> target_wp = holding_last_wp_? hold_position_ : waypoints_[wp_idx_];
+  
+  Eigen::Vector3f target(target_wp[0], target_wp[1], target_wp[2]);
+  msg.position = {target_wp[0], target_wp[1], target_wp[2]};
+  
   Eigen::Vector3f to_wp = target - current;
   float dist_to_wp = to_wp.norm();
-  Eigen::Vector3f direction_v(to_wp.x()/dist_to_wp, to_wp.y()/dist_to_wp, to_wp.z()/dist_to_wp);
-
-  if (flight_mode_ == MULTIROTOR) {
-    msg.position = {wp[0], wp[1], wp[2]};
-
-    if (dist_to_wp < 3.0f) {
-      hold_counter_++;
-      if (hold_counter_ > HOLD_THRESHOLD) {
-        RCLCPP_INFO(this->get_logger(), "[MULTIROTOR] Heading to waypoint %ld", wp_idx_ + 1);
-        hold_counter_ = 0;
-        wp_idx_++;
-        if(wp_idx_ == 1) transition(FIXED_WING);
-        if(wp_idx_ >= waypoints_.size()) {
-          RCLCPP_INFO(this->get_logger(), "Finished waypoint flight successfully.");
-          self_state = NodeState::SUCCESS;
-        } 
+  
+  //normalize to_wp
+  if (dist_to_wp > 1e-3f)
+    to_wp /= dist_to_wp;
+  switch(flight_mode_){
+    case STANDBY:
+      return;
+      
+    case MULTIROTOR:
+      if(holding_last_wp_) {
+        if(dist_to_wp < 3.0f) {
+          hold_counter_++;
+          
+          if(hold_counter_ > HOLD_THRESHOLD) {
+            RCLCPP_INFO(this->get_logger(), "Finished waypoint flight successfully.");
+            self_state = NodeState::SUCCESS;
+            flight_mode_ = FINISHED;
+          }
+        } else
+          hold_counter_ = 0;
       }
-    }
+      else { //not holding last waypoint
+        if(dist_to_wp < 3.0f) {
+          hold_counter_++;
+          
+          if(hold_counter_ > HOLD_THRESHOLD) {
+            hold_counter_ = 0;
+            wp_idx_++;
+            
+            if(wp_idx_ == 1) transition(FIXED_WING);
+            
+            RCLCPP_INFO(get_logger(), "[MULTIROTOR] Heading to waypoint %zu", wp_idx_);
+          }
+        } else
+          hold_counter_ = 0;
+      }
+      break;
+    
+    case FIXED_WING:
+      msg.velocity = {k*to_wp.x(), k*to_wp.y(), 0.0f};
+      if (dist_to_wp < 10.0f) {
+        wp_idx_++;
+        if(wp_idx_ >= waypoints_.size()) {
+          holding_last_wp_ = true;
+          transition(MULTIROTOR);
+        }
+        else {
+          RCLCPP_INFO(this->get_logger(), "[FIXED_WING] Heading to waypoint %ld", wp_idx_);
+        }
+      }
+      break;
+      
+    case FINISHED:
+      msg.position = {hold_position_[0], hold_position_[1], hold_position_[2]};
+      break;
   }
-
-  else if (flight_mode_ == FIXED_WING) {
-    msg.position = {wp[0], wp[1], wp[2]};
-    msg.velocity = {k*direction_v.x(), k*direction_v.y(), 0};
-
-    if (dist_to_wp < 10.0f) {
-      wp_idx_++;
-      RCLCPP_INFO(this->get_logger(), "[FIXED_WING] Heading to waypoint %ld", wp_idx_);
-    }
-
-    if (wp_idx_ + 2> waypoints_.size()) transition(MULTIROTOR);
-  }
-
-  else if (flight_mode_ == FINISHED) return;
-
   msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
   trajectory_setpoint_publisher->publish(msg);
 }

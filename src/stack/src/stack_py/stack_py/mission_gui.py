@@ -33,23 +33,23 @@ class MissionGui(Node):
         self.last_image_time = 0.0
         self.last_status_time = 0.0
 
-        self.bottom_sub = self.create_subscription(
+        self.raw_sub = self.create_subscription(
             CompressedImage,
-            "/vision/compressed",
-            self.bottom_callback,
+            "/nodes/vision/stream",
+            self.raw_callback,
             10
         )
 
         self.yolo_sub = self.create_subscription(
             CompressedImage,
-            "/yolo/compressed",
+            "/nodes/yolo/stream",
             self.yolo_callback,
             10
         )
 
         self.marker_sub = self.create_subscription(
             CompressedImage,
-            "/marker/compressed",
+            "/nodes/marker/stream",
             self.marker_callback,
             10
         )
@@ -66,7 +66,7 @@ class MissionGui(Node):
         self.get_logger().info("Mission GUI started")
 
 
-    def bottom_callback(self, msg):
+    def raw_callback(self, msg):
         img = cv2.imdecode(
             np.frombuffer(msg.data, np.uint8),
             cv2.IMREAD_COLOR
