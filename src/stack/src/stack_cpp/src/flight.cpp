@@ -52,6 +52,11 @@ class Flight : public rclcpp::Node {
         
         if(self_state != NodeState::BUSY)
           return;
+          
+        if(flight_mode_ == STANDBY) {
+          this->set_origin();
+          if(set_origin_done) flight_mode_ = MULTIROTOR;
+        }
 
         publishTrajectorySetpoint();
 
@@ -75,12 +80,13 @@ class Flight : public rclcpp::Node {
     VehicleOdometry curr_odom_;
 
     enum FlightMode {
-        MULTIROTOR = 3,
-        FIXED_WING = 4,
-        FINISHED
+      STANDBY,
+      MULTIROTOR = 3,
+      FIXED_WING = 4,
+      FINISHED
     };
 
-    FlightMode flight_mode_ = MULTIROTOR;
+    FlightMode flight_mode_ = STANDBY;
 
     std::vector<std::array<float,3>> waypoints_ = {
       {0.0f, 0.0f, -25.0f},
@@ -106,6 +112,11 @@ class Flight : public rclcpp::Node {
 
     float k = 1;
     
+    void set_origin();
+    float origin[3] = {0, 0, 0};
+    bool set_origin_done = false;
+    int origin_counter = 0;
+    int origin_count_threshold = 10;
     
     MissionManager manager;
     NodeState self_state = NodeState::IDLE;
@@ -167,6 +178,27 @@ void Flight::publishTrajectorySetpoint() {
   trajectory_setpoint_publisher->publish(msg);
 }
 
+void Flight::set_origin(){
+  if(origin_counter < origin_count_threshold){
+    origin[0] += curr_odom_.position[0];
+    origin[1] += curr_odom_.position[1];
+    origin[2] += curr_odom_.position[2];
+    origin_counter ++;
+  }
+  else {    
+    origin[0] /= origin_count_threshold;
+    origin[1] /= origin_count_threshold;
+    origin[2] /= origin_count_threshold;
+
+    set_origin_done = true;
+    RCLCPP_INFO(this->get_logger(), "Origin set to (%f, %f, %f)", origin[0], origin[1], origin[2]);
+    for(int i = 0; i < waypoints_.size(); i++){
+      waypoints_[i][0] += origin[0];
+      waypoints_[i][1] += origin[1];
+      waypoints_[i][2] += origin[2];
+    }
+  }  
+}
 
 void Flight::publishVehicleCommand(uint16_t command, float param1, float param2) {
   VehicleCommand msg {};

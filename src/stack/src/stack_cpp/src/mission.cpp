@@ -125,11 +125,16 @@ class Mission : public rclcpp::Node {
               RCLCPP_INFO(this->get_logger(), "Sending activation command to LOGGER.");
             }
             
+            if(manager.get(NodeName::VISION) == NodeState::IDLE) {
+              publishMissionCommand(NodeName::VISION, NodeState::BUSY);
+              RCLCPP_INFO(this->get_logger(), "Sending activation command to VISION.");
+            }
+            
             all_go = (manager.get(NodeName::MISSION) == NodeState::BUSY) &&
               (manager.get(NodeName::FLIGHT) == NodeState::IDLE) &&
               (manager.get(NodeName::TARGET) == NodeState::IDLE) &&
               (manager.get(NodeName::GRIPPER) == NodeState::IDLE) &&
-              (manager.get(NodeName::VISION) == NodeState::IDLE) &&
+              (manager.get(NodeName::VISION) == NodeState::BUSY) &&
               (manager.get(NodeName::MARKER) == NodeState::IDLE) &&
               (manager.get(NodeName::YOLO) == NodeState::IDLE) &&
               (manager.get(NodeName::LOGGER) == NodeState::BUSY);

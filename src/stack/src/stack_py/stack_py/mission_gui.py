@@ -21,17 +21,36 @@ class MissionGui(Node):
     def __init__(self):
         super().__init__("mission_gui")
         self.mm = MissionManager()
-        self.frame = np.zeros(
-            (720, 1280, 3),
-            dtype=np.uint8
-        )
+        PANEL_W = 640
+        PANEL_H = 360
+
+        self.frames = {
+            "raw": np.zeros((PANEL_H, PANEL_W, 3), dtype=np.uint8),
+            "yolo": np.zeros((PANEL_H, PANEL_W, 3), dtype=np.uint8),
+            "marker": np.zeros((PANEL_H, PANEL_W, 3), dtype=np.uint8),
+        }
+	
         self.last_image_time = 0.0
         self.last_status_time = 0.0
 
-        self.image_sub = self.create_subscription(
+        self.bottom_sub = self.create_subscription(
             CompressedImage,
-            "/vision/debug_image/compressed",
-            self.image_callback,
+            "/vision/compressed",
+            self.bottom_callback,
+            10
+        )
+
+        self.yolo_sub = self.create_subscription(
+            CompressedImage,
+            "/yolo/compressed",
+            self.yolo_callback,
+            10
+        )
+
+        self.marker_sub = self.create_subscription(
+            CompressedImage,
+            "/marker/compressed",
+            self.marker_callback,
             10
         )
 
@@ -47,17 +66,33 @@ class MissionGui(Node):
         self.get_logger().info("Mission GUI started")
 
 
-    def image_callback(self, msg):
-        try:
-            np_arr = np.frombuffer(msg.data, np.uint8)
-            self.frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-            self.last_image_time = time.time()
+    def bottom_callback(self, msg):
+        img = cv2.imdecode(
+            np.frombuffer(msg.data, np.uint8),
+            cv2.IMREAD_COLOR
+        )
 
-        except Exception as e:
-            self.get_logger().error(
-                f"Image decode failed: {e}"
-            )
+        self.frames["raw"] = cv2.resize(img, (640, 360))
+        self.last_image_time = time.time()
 
+
+    def yolo_callback(self, msg):
+        img = cv2.imdecode(
+            np.frombuffer(msg.data, np.uint8),
+            cv2.IMREAD_COLOR
+        )
+
+        self.frames["yolo"] = cv2.resize(img, (640, 360))
+        self.last_image_time = time.time()
+
+    def marker_callback(self, msg):
+        img = cv2.imdecode(
+            np.frombuffer(msg.data, np.uint8),
+            cv2.IMREAD_COLOR
+        ) 
+
+        self.frames["marker"] = cv2.resize(img, (640, 360))
+        self.last_image_time = time.time()
             
     def status_callback(self, msg):
         self.mm.set_raw(msg.data)
@@ -81,14 +116,15 @@ class MissionGui(Node):
         )
 
 
-    def draw_status_panel(self, frame):
+    def draw_status_panel(self):
+        panel = np.zeros((360, 640, 3), dtype=np.uint8)
         x = 20
         y = 40
 
         cv2.putText(
-            frame, "MISSION STATUS", (x, y),
+            panel, "MISSION STATUS", (x, y),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.8, (255, 255, 255), 2
+            0.8, (255,255,255), 2
         )
 
         y += 50
@@ -105,19 +141,16 @@ class MissionGui(Node):
             )
 
             cv2.putText(
-                frame, text, (x, y),
+                panel, text, (x, y),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.7, color, 2
             )
 
             y += 40
 
-        status_alive = (
-            time.time()
-            - self.last_status_time
-        ) < 2.0
-
-	#green if alive else red
+        status_alive = (time.time() - self.last_status_time) < 2.0
+        
+        #green if alive else red
         color = ((0, 255, 0) if status_alive else (0, 0, 255))
 
         text = (
@@ -127,16 +160,12 @@ class MissionGui(Node):
         )
 
         cv2.putText(
-            frame, text, (x, y + 20),
+            panel, text, (x, y + 20),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7, color, 2
         )
 
-        image_alive = (
-            time.time()
-            - self.last_image_time
-        ) < 2.0
-
+        image_alive = (time.time() - self.last_image_time) < 2.0
         color = ((0, 255, 0) if image_alive else (0, 0, 255))
 
         text = (
@@ -146,33 +175,35 @@ class MissionGui(Node):
         )
 
         cv2.putText(
-            frame, text, (x, y + 60),
+            panel, text, (x, y + 60),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7, color, 2
         )
 
-        h = frame.shape[0]
+        h = panel.shape[0]
 
         cv2.putText(
-            frame, "[S] START",
+            panel, "[S] START",
             (20, h - 90),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7, (0, 255, 0), 2
         )
 
         cv2.putText(
-            frame, "[A] ABORT",
+            panel, "[A] ABORT",
             (20, h - 55),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7, (0, 0, 255), 2
         )
 
         cv2.putText(
-            frame, "[Q] QUIT",
+            panel, "[Q] QUIT",
             (20, h - 20),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7, (255, 255, 255), 2
         )
+       
+        return panel
         
 
     @staticmethod
@@ -191,14 +222,30 @@ class MissionGui(Node):
 
     def update_gui(self):
 
-        frame = self.frame.copy()
+        raw = self.frames["raw"].copy()
+        yolo = self.frames["yolo"].copy()
+        marker = self.frames["marker"].copy()
 
-        self.draw_status_panel(frame)
+        status = self.draw_status_panel()
 
-        cv2.imshow(
-            "Mission GUI",
-            frame
-        )
+        cv2.putText(raw, "RAW", (10,30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8, (255,255,255), 2)
+
+        cv2.putText(yolo, "YOLO", (10,30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8, (255,255,255), 2)
+
+        cv2.putText(marker, "Marker", (10,30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8, (255,255,255), 2)
+
+        top = np.hstack((raw, yolo))
+        raw_row = np.hstack((status, marker))
+
+        dashboard = np.vstack((top, raw_row))
+
+        cv2.imshow("Mission GUI", dashboard)
 
         key = cv2.waitKey(1) & 0xFF
 
@@ -218,6 +265,7 @@ class MissionGui(Node):
             cv2.destroyAllWindows()
             rclpy.shutdown()
 
+
 def main(args=None):
     rclpy.init(args=args)
     node = MissionGui()
@@ -230,6 +278,7 @@ def main(args=None):
         cv2.destroyAllWindows()
         node.destroy_node()
         rclpy.shutdown()
+
 
 if __name__ == "__main__":
     main()

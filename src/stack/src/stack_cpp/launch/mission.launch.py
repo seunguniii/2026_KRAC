@@ -21,6 +21,14 @@ def generate_launch_description():
     ),
     
     Node(
+      package='stack_py',
+      executable='vision',
+      name='vision',
+      output='screen',
+      emulate_tty=True
+    ),
+    
+    Node(
       package='stack_cpp',
       executable='logger',
       name='logger',

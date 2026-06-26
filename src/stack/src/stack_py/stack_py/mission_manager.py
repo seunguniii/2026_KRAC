@@ -1,10 +1,6 @@
 from enum import IntEnum
 
 
-# ============================================================
-# MISSION MODES
-# ============================================================
-
 class MissionMode(IntEnum):
     IDLE = 0
     TAKEOFF = 1
@@ -19,20 +15,12 @@ class MissionMode(IntEnum):
     ABORT = 100
 
 
-# ============================================================
-# NODE STATES
-# ============================================================
-
 class NodeState(IntEnum):
     IDLE = 0b00
     BUSY = 0b01
     SUCCESS = 0b10
     ERROR = 0b11
 
-
-# ============================================================
-# NODE NAMES
-# ============================================================
 
 class NodeName(IntEnum):
     MISSION = 0
@@ -45,106 +33,57 @@ class NodeName(IntEnum):
     LOGGER = 7
 
 
-# ============================================================
-# MISSION MANAGER
-# ============================================================
-
 class MissionManager:
-
     BITS_PER_NODESTATE = 2
     BITS_PER_NODE = 3
 
     MASK_NODESTATE = 0b11
     MASK_NODE = 0b111
 
-    def __init__(self):
 
+    def __init__(self):
         self.data = 0
 
-    # ========================================================
-    # RAW ACCESS
-    # ========================================================
 
     def set_raw(self, data: int):
-
         self.data = int(data)
 
-    def raw(self):
 
+    def raw(self):
         return self.data
 
-    def clear(self):
 
+    def clear(self):
         self.data = 0
 
-    # ========================================================
-    # AGGREGATE STATUS
-    # ========================================================
 
-    def set(
-        self,
-        node: NodeName,
-        state: NodeState
-    ):
+    def set(self, node: NodeName, state: NodeState):
 
-        shift = (
-            int(node)
-            * self.BITS_PER_NODESTATE
-        )
+        shift = (int(node) * self.BITS_PER_NODESTATE)
+        self.data &= ~(self.MASK_NODESTATE << shift)
+        self.data |= (int(state) << shift)
 
-        self.data &= ~(
-            self.MASK_NODESTATE << shift
-        )
 
-        self.data |= (
-            int(state) << shift
-        )
-
-    def get(
-        self,
-        node: NodeName
-    ):
-
-        shift = (
-            int(node)
-            * self.BITS_PER_NODESTATE
-        )
-
-        value = (
-            (self.data >> shift)
-            & self.MASK_NODESTATE
-        )
+    def get(self, node: NodeName):
+        shift = (int(node) * self.BITS_PER_NODESTATE)
+        value = (self.data >> shift) & self.MASK_NODESTATE
 
         return NodeState(value)
 
-    # ========================================================
-    # COMMAND PACKETS
-    # ========================================================
 
     @staticmethod
-    def pack(
-        node: NodeName,
-        state: NodeState
-    ):
-
-        node_bits = (
-            int(node)
-            & MissionManager.MASK_NODE
-        )
-
-        state_bits = (
-            int(state)
-            & MissionManager.MASK_NODESTATE
-        )
+    def pack(node: NodeName, state: NodeState):
+        node_bits = (int(node) & MissionManager.MASK_NODE)
+        state_bits = (int(state) & MissionManager.MASK_NODESTATE)
 
         return (
             (node_bits << MissionManager.BITS_PER_NODESTATE)
             | state_bits
         )
 
+
     @staticmethod
     def get_node(cmd: int):
-
         value = (
             (cmd >> MissionManager.BITS_PER_NODESTATE)
             & MissionManager.MASK_NODE
@@ -152,9 +91,9 @@ class MissionManager:
 
         return NodeName(value)
 
+
     @staticmethod
     def get_command(cmd: int):
-
         value = (
             cmd
             & MissionManager.MASK_NODESTATE
@@ -162,33 +101,26 @@ class MissionManager:
 
         return NodeState(value)
 
-    # ========================================================
-    # HELPERS
-    # ========================================================
 
     def is_idle(self, node: NodeName):
-
         return (
             self.get(node)
             == NodeState.IDLE
         )
 
     def is_busy(self, node: NodeName):
-
         return (
             self.get(node)
             == NodeState.BUSY
         )
 
     def is_completed(self, node: NodeName):
-
         return (
             self.get(node)
             == NodeState.COMPLETED
         )
 
     def is_error(self, node: NodeName):
-
         return (
             self.get(node)
             == NodeState.ERROR

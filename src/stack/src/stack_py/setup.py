@@ -24,6 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'vision = stack_py.vision:main',
             'mission_gui = stack_py.mission_gui:main',
         ],
     },
