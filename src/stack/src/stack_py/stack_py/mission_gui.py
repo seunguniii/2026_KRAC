@@ -124,7 +124,7 @@ class MissionGui(Node):
         cv2.putText(
             panel, "MISSION STATUS", (x, y),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.8, (255,255,255), 2
+            0.6, (255,255,255), 2
         )
 
         y += 50
@@ -133,7 +133,7 @@ class MissionGui(Node):
             try:
                 state = self.mm.get(node)
             except Exception:
-                state = NodeState.ERROR
+                state = NodeState.ABORT
             color = self.state_color(state)
             text = (
                 f"{node.name:<18}"
@@ -143,10 +143,10 @@ class MissionGui(Node):
             cv2.putText(
                 panel, text, (x, y),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.7, color, 2
+                0.5, color, 2
             )
 
-            y += 40
+            y += 30
 
         status_alive = (time.time() - self.last_status_time) < 2.0
         
@@ -160,9 +160,9 @@ class MissionGui(Node):
         )
 
         cv2.putText(
-            panel, text, (x, y + 20),
+            panel, text, (x + 170, y - 300),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.7, color, 2
+            0.5, color, 2
         )
 
         image_alive = (time.time() - self.last_image_time) < 2.0
@@ -175,32 +175,32 @@ class MissionGui(Node):
         )
 
         cv2.putText(
-            panel, text, (x, y + 60),
+            panel, text, (x + 170, y - 280),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.7, color, 2
+            0.5, color, 2
         )
 
         h = panel.shape[0]
 
         cv2.putText(
             panel, "[S] START",
-            (20, h - 90),
+            (520, h - 80),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.7, (0, 255, 0), 2
+            0.5, (0, 255, 0), 2
         )
 
         cv2.putText(
             panel, "[A] ABORT",
-            (20, h - 55),
+            (520, h - 50),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.7, (0, 0, 255), 2
+            0.5, (0, 0, 255), 2
         )
 
         cv2.putText(
             panel, "[Q] QUIT",
-            (20, h - 20),
+            (520, h - 20),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.7, (255, 255, 255), 2
+            0.5, (255, 255, 255), 2
         )
        
         return panel
@@ -214,7 +214,7 @@ class MissionGui(Node):
             return (0, 255, 255)
         elif state == NodeState.SUCCESS:
             return (0, 255, 0)
-        elif state == NodeState.ERROR:
+        elif state == NodeState.ABORT:
             return (0, 0, 255)
 
         return (255, 255, 255)
@@ -230,15 +230,15 @@ class MissionGui(Node):
 
         cv2.putText(raw, "RAW", (10,30),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.8, (255,255,255), 2)
+            0.6, (255,255,255), 2)
 
         cv2.putText(yolo, "YOLO", (10,30),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.8, (255,255,255), 2)
+            0.6, (255,255,255), 2)
 
         cv2.putText(marker, "Marker", (10,30),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.8, (255,255,255), 2)
+            0.6, (255,255,255), 2)
 
         top = np.hstack((raw, yolo))
         raw_row = np.hstack((status, marker))
@@ -257,7 +257,7 @@ class MissionGui(Node):
         #abort mission
         elif key == ord('a'):
             self.get_logger().error("!!!ABORTING MISSION!!!")
-            self.send_command(NodeName.MISSION, NodeState.ERROR)
+            self.send_command(NodeName.MISSION, NodeState.ABORT)
             
         #quit gui
         elif key == ord('q'):

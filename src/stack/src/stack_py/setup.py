@@ -26,6 +26,7 @@ setup(
         'console_scripts': [
             'vision = stack_py.vision:main',
             'marker = stack_py.marker:main',
+            'yolo = stack_py.yolo:main',
             'mission_gui = stack_py.mission_gui:main',
         ],
     },

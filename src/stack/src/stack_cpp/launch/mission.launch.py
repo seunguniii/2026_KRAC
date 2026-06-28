@@ -46,6 +46,22 @@ def generate_launch_description():
     
     Node(
       package='stack_cpp',
+      executable='gripper',
+      name='gripper',
+      output='screen',
+      emulate_tty=True
+    ),
+    
+    Node(
+      package='stack_py',
+      executable='yolo',
+      name='yolo',
+      output='screen',
+      emulate_tty=True
+    ),
+    
+    Node(
+      package='stack_cpp',
       executable='logger',
       name='logger',
       output='screen',

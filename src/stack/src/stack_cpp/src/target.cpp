@@ -7,11 +7,10 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/u_int32.hpp"
-#include "geometry_msgs/msg/point.hpp"
+#include "geometry_msgs/msg/quaternion.hpp"
 
 #include "px4_msgs/msg/trajectory_setpoint.hpp"
 #include "px4_msgs/msg/vehicle_command.hpp"
-#include "px4_msgs/msg/vehicle_land_detected.hpp"
 #include "px4_msgs/msg/vehicle_odometry.hpp"
 
 #include "stack_cpp/mission_manager.h"
@@ -44,6 +43,11 @@ class Target : public rclcpp::Node {
       trajectory_setpoint_publisher = this->create_publisher<TrajectorySetpoint>("/fmu/in/trajectory_setpoint", 10);
       vehicle_command_publisher = this->create_publisher<VehicleCommand>("/fmu/in/vehicle_command", 10);
       
+      mission_mode_subscriber = this->create_subscription<UInt32>("mission/mode", 10,
+        [this](const UInt32::SharedPtr msg) {
+          mission_mode = static_cast<MissionMode>(msg->data);
+        });
+      
       command_subscriber = this->create_subscription<UInt32>("mission/command", 10,
         [this](const UInt32::SharedPtr msg) {
           uint32_t cmd = msg->data;
@@ -60,19 +64,14 @@ class Target : public rclcpp::Node {
         [this](const VehicleOdometry::SharedPtr msg) {
           curr_odom_ = *msg;
         });
-      landed_subscriber = this->create_subscription<VehicleLandDetected>(
-        "/fmu/out/vehicle_land_detected",
-        rclcpp::SensorDataQoS(),
-        [this](const VehicleLandDetected::SharedPtr msg) {
-          landed_ = msg->landed;
-        });
-      target_subscriber = this->create_subscription<Point>(
+      target_subscriber = this->create_subscription<Quaternion>(
         "/nodes/marker/target",
         10,
-        [this](const Point::SharedPtr msg) {
+        [this](const Quaternion::SharedPtr msg) {
           desired_x_ = msg->x;   // right(+), [m]
           desired_y_ = msg->y;   // forward(+), [m]
-          acc_alt_ = -msg->z;    // existing convention
+          acc_alt_ = msg->z;     // existing convention
+          desired_yaw_ = msg->w; // use for RESCUE
         });
 
       declare_parameters();
@@ -103,9 +102,9 @@ class Target : public rclcpp::Node {
     rclcpp::Publisher<VehicleCommand>::SharedPtr vehicle_command_publisher;
 
     rclcpp::Subscription<UInt32>::SharedPtr command_subscriber;
+    rclcpp::Subscription<UInt32>::SharedPtr mission_mode_subscriber;
     rclcpp::Subscription<VehicleOdometry>::SharedPtr odometry_subscriber;
-    rclcpp::Subscription<VehicleLandDetected>::SharedPtr landed_subscriber;
-    rclcpp::Subscription<geometry_msgs::msg::Point>::SharedPtr target_subscriber;
+    rclcpp::Subscription<geometry_msgs::msg::Quaternion>::SharedPtr target_subscriber;
 
   
     VehicleOdometry curr_odom_;
@@ -119,6 +118,7 @@ class Target : public rclcpp::Node {
     // Target state from vision node
     float desired_x_ = 0.0f;  // right(+), [m]
     float desired_y_ = 0.0f;  // forward(+), [m]
+    float desired_yaw_ = 0.0f; //North 0, CCW(+), [rad]
     float acc_alt_ = 0.0f;
 
     int lost_count_ = 0;
@@ -173,12 +173,13 @@ class Target : public rclcpp::Node {
     
     MissionManager manager;
     NodeState self_state = NodeState::IDLE;
+    MissionMode mission_mode = MissionMode::IDLE;
     void reportNodeStatus(NodeState state);
 };
 
 void Target::reportNodeStatus(NodeState state) {
   std_msgs::msg::UInt32 msg;
-  msg.data = manager.pack(NodeName::FLIGHT, state);
+  msg.data = manager.pack(NodeName::TARGET, state);
   status_publisher -> publish(msg);
 }
 
@@ -186,10 +187,6 @@ void Target::declare_parameters() {
   // 0: x/y position setpoint + z velocity setpoint
   // 1: x/y/z velocity setpoint
   this->declare_parameter<int>("land_param", VELOCITY_XYZ);
-
-  // 0: start landing immediately
-  // 1: fly to start_x/y/z first, then landing
-  this->declare_parameter<int>("start_param", 0);
   
   this->declare_parameter<int>("lost_abort_", 700);
   this->declare_parameter<float>("max_xy_", 0.4f);
@@ -216,7 +213,6 @@ void Target::declare_parameters() {
 
 void Target::read_parameters() {
   land_mode_ = this->get_parameter("land_param").as_int();
-  start_mode_ = this->get_parameter("start_param").as_int();
   
   lost_abort_ = this->get_parameter("lost_abort_").as_int();
   align_need_ = this->get_parameter("align_need_").as_int();
@@ -248,10 +244,57 @@ void Target::read_parameters() {
 }
 
 
+//TODO: add rescue/drop logics
+//
+//suggestion: planar guidance uses same logic
+//            altitude control uses different logic
+//            for an overall shorter code & avoids duplication.
+//
+//i.e.
+//
+// float target_planar_state[3];
+// float target_altitude;
+// float target_yaw;
+// target_planar_coordinate = planar_guidance(weights);
+// switch(mission_mode){
+//   case LANDING:
+//     target_altitude = land_altitude_control(); break;
+//   case RESCUE:
+//      target_altitude = rescue_altitude_control(); break;
+//   case DROP:
+//      target_altitude = drop_altitude_control(); break;
+// }
+// msg.x = target_planar_state[0];
+// msg.y = target_planar_state[1];
+// msg.z = target_altitude;
+// msg.yaw = target_planar_state[2]; <- nan for other modes, valid value for RESCUE
+// msg.timestamp = ...;
+// trajectory_setpoint_publisher -> publish(msg);
+//
+//another suggestion: build different classes for different mission modes
+//
+//i.e.
+// mode = control_mode(mission_mode);
+// mode.planar_coordinate();
+// mode.altitude();
+// mode.publish_trajectory_stepoint();
+
 void Target::timer_callback() {
-  land();
+  switch(mission_mode){
+    case MissionMode::LANDING:
+      RCLCPP_WARN(this->get_logger(),"landing");
+      land();
+      break;
+      
+    case MissionMode::RESCUE:
+    case MissionMode::DROP:
+    default:
+      self_state = NodeState::SUCCESS;
+      break;
+  }
   offboard_setpoint_counter_++;
 }
+
 
 float Target::select_descent_speed(float alt_m, bool valid_xy) const {
   if (!valid_xy || hold_counter_ < align_need_)
@@ -312,6 +355,7 @@ void Target::land() {
   }
 
   if (lost_count_ > lost_abort_) {
+    //TODO: suggestion; land at current position?
     RCLCPP_WARN(
       this->get_logger(),
       "[LANDING] target lost too long -> switch PX4 to POSITION mode");

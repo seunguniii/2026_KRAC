@@ -7,11 +7,14 @@ from typing import Optional, Tuple
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
 
 from std_msgs.msg import UInt32
-from geometry_msgs.msg import Point
+from geometry_msgs.msg import Quaternion
 from sensor_msgs.msg import CompressedImage, PointCloud2
 from cv_bridge import CvBridge, CvBridgeError
+
+from px4_msgs.msg import DistanceSensor
 
 from .kalman import TargetKalman2D
 from .mission_manager import (
@@ -39,11 +42,11 @@ class Marker(Node):
 
     def __init__(self):
         super().__init__('marker')
-        
+
         self._bridge = CvBridge()
-        
+
         self.status_publisher = self.create_publisher(UInt32, '/nodes/marker/status', 10)
-        self.target_publisher = self.create_publisher(Point, '/nodes/marker/target', 10)
+        self.target_publisher = self.create_publisher(Quaternion, '/nodes/marker/target', 10)
         self.stream_publisher = self.create_publisher(CompressedImage, '/nodes/marker/stream', 10)
 
         self.stream_subscriber = self.create_subscription(
@@ -53,17 +56,18 @@ class Marker(Node):
             UInt32, '/mission/command', self.command_callback, 10
         )
 
+        qos_profile_sub = QoSProfile(
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            durability=QoSDurabilityPolicy.VOLATILE,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=0
+        )
 
-        #TODO: parameterize these
-        is_simulation_ = True
-        world_ = "aruco" 
-        airframe_ = "standard_vtol_sensors"
-        
         self._lidar_sub = self.create_subscription(
-            PointCloud2,
-            f"/world/{world_}/model/{airframe_}_0/link/lidar_sensor_link/sensor/lidar/scan/points",
+            DistanceSensor,
+            '/fmu/out/distance_sensor',
             self._lidar_cb,
-            10
+            qos_profile_sub
         )
     
         #do NOT use 0, will cause division-by-0 error
@@ -86,10 +90,8 @@ class Marker(Node):
         self.timer = self.create_timer(1.0/FPS, self.report_status)
 
 
-    def _lidar_cb(self, msg: PointCloud2) -> None:
-        raw = bytes(msg.data)
-        first_four = raw[0:4]
-        self._altitude = struct.unpack('<f', first_four)[0] 
+    def _lidar_cb(self, msg) -> None:
+        self._altitude = msg.current_distance
 
 
     def command_callback(self, msg):
@@ -210,7 +212,7 @@ class Marker(Node):
         
 
     def _publish_coordinates(self, x: float, y: float, z: float):
-        msg = Point()
+        msg = Quaternion()
         msg.x, msg.y, msg.z = x, y, z
         self.target_publisher.publish(msg)
 

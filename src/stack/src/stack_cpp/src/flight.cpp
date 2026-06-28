@@ -1,15 +1,10 @@
 #include <iostream>
-#include <chrono>
-#include <vector>
-#include <stdint.h>
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
 
 #include "rclcpp/rclcpp.hpp"
 
 #include "std_msgs/msg/u_int32.hpp"
-#include "std_msgs/msg/int32.hpp"
-#include "std_msgs/msg/bool.hpp"
 
 #include "px4_msgs/msg/trajectory_setpoint.hpp"
 #include "px4_msgs/msg/vehicle_command.hpp"
@@ -41,9 +36,19 @@ class Flight : public rclcpp::Node {
           uint32_t cmd = msg->data;
           NodeState command_state = manager.get_command(cmd);
           if(manager.get_node(cmd) == NodeName::FLIGHT && self_state != command_state) {
+            if(command_state == NodeState::BUSY) {
+              flight_mode_ = STANDBY;
+              holding_last_wp_ = false;
+              hold_counter_ = 0;
+            }
             self_state = command_state;
             RCLCPP_INFO(get_logger(), "Command recieved from MISSION.");
           }
+        });
+        
+        mission_mode_subscriber = this->create_subscription<UInt32>("mission/mode", 10,
+        [this](const UInt32::SharedPtr msg) {
+          mission_mode = static_cast<MissionMode>(msg->data);
         });
 
       //main logic
@@ -75,6 +80,7 @@ class Flight : public rclcpp::Node {
     rclcpp::Publisher<VehicleCommand>::SharedPtr vehicle_command_publisher;
 
     rclcpp::Subscription<UInt32>::SharedPtr command_subscriber;
+    rclcpp::Subscription<UInt32>::SharedPtr mission_mode_subscriber;
     rclcpp::Subscription<VehicleOdometry>::SharedPtr vehicle_odometry_subscriber;
 
     VehicleOdometry curr_odom_;
@@ -87,7 +93,6 @@ class Flight : public rclcpp::Node {
     };
 
     FlightMode flight_mode_ = STANDBY;
-
     std::vector<std::array<float,3>> waypoints_ = {
       {0.0f, 0.0f, -10.0f},
       {100.0f, 0.0f, -10.0f},
@@ -96,6 +101,7 @@ class Flight : public rclcpp::Node {
       {100.0f, 0.0f, -10.0f},
       {0.0f, 0.0f, -10.0f}
     };
+    
     std::array<float,3>hold_position_ = waypoints_.back();
     bool holding_last_wp_ = false;
 
@@ -104,8 +110,6 @@ class Flight : public rclcpp::Node {
 
     int hold_counter_ = 0;
     const int HOLD_THRESHOLD = 20;
-
-    void reportNodeStatus(NodeState state);
 
     void publishTrajectorySetpoint();
     void publishVehicleCommand(uint16_t command, float param1 = 0.0, float param2 = 0.0);
@@ -121,6 +125,8 @@ class Flight : public rclcpp::Node {
     
     MissionManager manager;
     NodeState self_state = NodeState::IDLE;
+    MissionMode mission_mode = MissionMode::IDLE;
+    void reportNodeStatus(NodeState state);
 };
 
 
@@ -171,7 +177,9 @@ void Flight::publishTrajectorySetpoint() {
           
           if(hold_counter_ > HOLD_THRESHOLD) {
             hold_counter_ = 0;
-            wp_idx_++;
+            if(mission_mode == MissionMode::WP_FLIGHT) wp_idx_++;
+            else if(mission_mode == MissionMode::INVERSE_WP_FLIGHT) wp_idx_--;
+            else self_state = NodeState::ABORT;
             
             if(wp_idx_ == 1) transition(FIXED_WING);
             
