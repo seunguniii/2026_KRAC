@@ -279,8 +279,10 @@ class Mission : public rclcpp::Node {
               RCLCPP_INFO(this->get_logger(), "Command YOLO to IDLE.");
               publishMissionCommand(NodeName::YOLO, NodeState::IDLE);
           
-              RCLCPP_INFO(this->get_logger(), "Sending activation command to FLIGHT.");
-              publishMissionCommand(NodeName::FLIGHT, NodeState::BUSY);
+              RCLCPP_INFO(this->get_logger(), "Sending activation command to TARGET.");
+              publishMissionCommand(NodeName::TARGET, NodeState::BUSY);
+              RCLCPP_INFO(this->get_logger(), "Sending activation command to MARKER.");
+              publishMissionCommand(NodeName::MARKER, NodeState::BUSY);
             }
             break;
           
@@ -297,11 +299,14 @@ class Mission : public rclcpp::Node {
             break;
 
           case MissionMode::FINISHED:
+            if(!armed){
+              publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1.0f, 3.0f);
+              mission_mode = MissionMode::IDLE;
+              return;
+            }
             if(landed){
               RCLCPP_INFO(this->get_logger(), "Disarming vehicle.");
               disarm();
-              publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1.0f, 3.0f);
-              mission_mode = MissionMode::IDLE;
             }
             idle();
             break;

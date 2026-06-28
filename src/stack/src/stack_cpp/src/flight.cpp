@@ -1,6 +1,7 @@
 #include <iostream>
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
+#include <algorithm>
 
 #include "rclcpp/rclcpp.hpp"
 
@@ -38,8 +39,12 @@ class Flight : public rclcpp::Node {
           if(manager.get_node(cmd) == NodeName::FLIGHT && self_state != command_state) {
             if(command_state == NodeState::BUSY) {
               flight_mode_ = STANDBY;
-              holding_last_wp_ = false;
               hold_counter_ = 0;
+              wp_idx_ = 0;
+              holding_last_wp_ = false;
+              
+              setWaypointOrder(mission_mode);
+              hold_position_ = waypoints_.back();
             }
             self_state = command_state;
             RCLCPP_INFO(get_logger(), "Command recieved from MISSION.");
@@ -59,8 +64,11 @@ class Flight : public rclcpp::Node {
           return;
           
         if(flight_mode_ == STANDBY) {
+          if(set_origin_done){
+            flight_mode_ = MULTIROTOR;
+            return;
+          }
           this->set_origin();
-          if(set_origin_done) flight_mode_ = MULTIROTOR;
         }
 
         publishTrajectorySetpoint();
@@ -93,7 +101,8 @@ class Flight : public rclcpp::Node {
     };
 
     FlightMode flight_mode_ = STANDBY;
-    std::vector<std::array<float,3>> waypoints_ = {
+    
+    std::vector<std::array<float,3>> forward_waypoints = {
       {0.0f, 0.0f, -10.0f},
       {100.0f, 0.0f, -10.0f},
       {200.0f, 100.0f, -10.0f},
@@ -102,7 +111,11 @@ class Flight : public rclcpp::Node {
       {0.0f, 0.0f, -10.0f}
     };
     
-    std::array<float,3>hold_position_ = waypoints_.back();
+    std::vector<std::array<float,3>> waypoints_ = forward_waypoints;
+    
+    void setWaypointOrder(MissionMode mode);
+    
+    std::array<float,3>hold_position_ = forward_waypoints.back();
     bool holding_last_wp_ = false;
 
     uint64_t offboard_setpoint_counter_ {0};
@@ -137,6 +150,17 @@ void Flight::reportNodeStatus(NodeState state) {
 }
 
 
+void Flight::setWaypointOrder(MissionMode mode) {
+    if (mode == MissionMode::WP_FLIGHT) waypoints_ = forward_waypoints;
+    else if (mode == MissionMode::INVERSE_WP_FLIGHT) {
+        holding_last_wp_ = false;
+        waypoints_ = forward_waypoints;
+        std::reverse(waypoints_.begin(), waypoints_.end());
+    }
+    else self_state = NodeState::ABORT;
+}
+
+
 //main logic
 void Flight::publishTrajectorySetpoint() {
   TrajectorySetpoint msg {};
@@ -156,7 +180,7 @@ void Flight::publishTrajectorySetpoint() {
     to_wp /= dist_to_wp;
   switch(flight_mode_){
     case STANDBY:
-      return;
+      break;
       
     case MULTIROTOR:
       if(holding_last_wp_) {
@@ -177,9 +201,7 @@ void Flight::publishTrajectorySetpoint() {
           
           if(hold_counter_ > HOLD_THRESHOLD) {
             hold_counter_ = 0;
-            if(mission_mode == MissionMode::WP_FLIGHT) wp_idx_++;
-            else if(mission_mode == MissionMode::INVERSE_WP_FLIGHT) wp_idx_--;
-            else self_state = NodeState::ABORT;
+            wp_idx_++;
             
             if(wp_idx_ == 1) transition(FIXED_WING);
             
