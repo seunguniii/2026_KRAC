@@ -142,7 +142,7 @@ class Target : public rclcpp::Node {
     float descent_mid_mps_ = 0.30f;
     float descent_low_mps_ = 0.20f;
 
-    float low_enough_ = 0.7f; //up (+), [m]
+    float low_enough_ = 1.5f; //up (+), [m]
 
     bool use_q_inverse_ = false;
 

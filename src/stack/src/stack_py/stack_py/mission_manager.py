@@ -68,7 +68,7 @@ class MissionManager:
         self.data |= (int(mode) & self.MASK_MODE) << self.SHIFT_SUMMARY_MODE
         
      
-    def get_mode(self):
+    def get_summary_mode(self):
         return MissionMode((self.data >> self.SHIFT_SUMMARY_MODE) & self.MASK_MODE)
 
 

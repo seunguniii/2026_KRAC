@@ -21,16 +21,20 @@ class MissionGui(Node):
     def __init__(self):
         super().__init__("mission_gui")
         self.mm = MissionManager()
-        PANEL_W = 640
-        PANEL_H = 360
+        self.PANEL_W = 640
+        self.PANEL_H = 360
 
         self.frames = {
-            "raw": np.zeros((PANEL_H, PANEL_W, 3), dtype=np.uint8),
-            "yolo": np.zeros((PANEL_H, PANEL_W, 3), dtype=np.uint8),
-            "marker": np.zeros((PANEL_H, PANEL_W, 3), dtype=np.uint8),
+            "raw": np.zeros((self.PANEL_H, self.PANEL_W, 3), dtype=np.uint8),
+            "yolo": np.zeros((self.PANEL_H, self.PANEL_W, 3), dtype=np.uint8),
+            "marker": np.zeros((self.PANEL_H, self.PANEL_W, 3), dtype=np.uint8),
         }
 	
-        self.last_image_time = 0.0
+        self.last_image_time = {
+            "raw": 0.0,
+            "yolo": 0.0,
+            "marker": 0.0,
+        }
         self.last_status_time = 0.0
 
         self.raw_sub = self.create_subscription(
@@ -72,8 +76,8 @@ class MissionGui(Node):
             cv2.IMREAD_COLOR
         )
 
-        self.frames["raw"] = cv2.resize(img, (640, 360))
-        self.last_image_time = time.time()
+        self.frames["raw"] = cv2.resize(img, (self.PANEL_W, self.PANEL_H))
+        self.last_image_time["raw"] = time.time()
 
 
     def yolo_callback(self, msg):
@@ -82,8 +86,8 @@ class MissionGui(Node):
             cv2.IMREAD_COLOR
         )
 
-        self.frames["yolo"] = cv2.resize(img, (640, 360))
-        self.last_image_time = time.time()
+        self.frames["yolo"] = cv2.resize(img, (self.PANEL_W, self.PANEL_H))
+        self.last_image_time["yolo"] = time.time()
 
     def marker_callback(self, msg):
         img = cv2.imdecode(
@@ -91,8 +95,8 @@ class MissionGui(Node):
             cv2.IMREAD_COLOR
         ) 
 
-        self.frames["marker"] = cv2.resize(img, (640, 360))
-        self.last_image_time = time.time()
+        self.frames["marker"] = cv2.resize(img, (self.PANEL_W, self.PANEL_H))
+        self.last_image_time["marker"] = time.time()
             
     def status_callback(self, msg):
         self.mm.set_raw(msg.data)
@@ -115,9 +119,31 @@ class MissionGui(Node):
             f"{node.name} -> {state.name}"
         )
 
-
+    def lost_frame(self, title):
+        frame = np.zeros((self.PANEL_H, self.PANEL_W, 3), dtype=np.uint8)
+        
+        cv2.putText(
+            frame, title, (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6, (255, 255, 255), 2
+        )
+        
+        text = "NO SIGNAL"
+        (font_w, font_h), baseline = cv2.getTextSize(
+            text, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 3
+        )
+        x = (self.PANEL_W - font_w) // 2
+        y = (self.PANEL_H + font_h) // 2
+        cv2.putText(
+            frame, text, (x, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.2, (0, 0, 255), 3
+        )
+        
+        return frame
+        
     def draw_status_panel(self):
-        panel = np.zeros((360, 640, 3), dtype=np.uint8)
+        panel = np.zeros((self.PANEL_H, self.PANEL_W, 3), dtype=np.uint8)
         x = 20
         y = 40
 
@@ -126,8 +152,17 @@ class MissionGui(Node):
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6, (255,255,255), 2
         )
+        
+        y += 35
+        
+        mode = self.mm.get_summary_mode()
+        cv2.putText(
+            panel, f"MISSION MODE : {mode.name}", (x, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55, (255,255,255), 2
+        )
 
-        y += 50
+        y += 40
 
         for node in NodeName:
             try:
@@ -146,36 +181,36 @@ class MissionGui(Node):
                 0.5, color, 2
             )
 
-            y += 30
-
-        status_alive = (time.time() - self.last_status_time) < 2.0
+            y += 25
         
         #green if alive else red
-        color = ((0, 255, 0) if status_alive else (0, 0, 255))
+        color = ((0, 255, 0) if self.status_alive else (0, 0, 255))
 
         text = (
             "MASTER STATUS : OK"
-            if status_alive
+            if self.status_alive
             else "MASTER STATUS : TIMEOUT"
         )
 
         cv2.putText(
-            panel, text, (x + 170, y - 300),
+            panel, text, (x, y),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5, color, 2
         )
 
-        image_alive = (time.time() - self.last_image_time) < 2.0
-        color = ((0, 255, 0) if image_alive else (0, 0, 255))
+        y += 25
+
+
+        color = ((0, 255, 0) if self.raw_alive else (0, 0, 255))
 
         text = (
             "VIDEO LINK : OK"
-            if image_alive
+            if self.raw_alive
             else "VIDEO LINK : TIMEOUT"
         )
 
         cv2.putText(
-            panel, text, (x + 170, y - 280),
+            panel, text, (x, y),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5, color, 2
         )
@@ -221,13 +256,31 @@ class MissionGui(Node):
 
 
     def update_gui(self):
+        timeout = 2.0
+        now = time.time()
+        self.status_alive = (now - self.last_status_time) < 2.0
+        self.raw_alive = now - self.last_image_time["raw"] < timeout
+        self.yolo_alive = now - self.last_image_time["yolo"] < timeout
+        self.marker_alive = now - self.last_image_time["marker"] < timeout
+        
+        if self.raw_alive:
+            raw = self.frames["raw"].copy()
+        else:
+            raw = self.lost_frame("RAW")
 
-        raw = self.frames["raw"].copy()
-        yolo = self.frames["yolo"].copy()
-        marker = self.frames["marker"].copy()
+        if self.yolo_alive:
+            yolo = self.frames["yolo"].copy()
+        else:
+            yolo = self.lost_frame("YOLO")
 
+        if self.marker_alive:
+            marker = self.frames["marker"].copy()
+        else:
+            marker = self.lost_frame("MARKER")
+            
         status = self.draw_status_panel()
 
+        '''
         cv2.putText(raw, "RAW", (10,30),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6, (255,255,255), 2)
@@ -239,7 +292,8 @@ class MissionGui(Node):
         cv2.putText(marker, "Marker", (10,30),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6, (255,255,255), 2)
-
+        '''
+        
         top = np.hstack((raw, yolo))
         raw_row = np.hstack((status, marker))
 

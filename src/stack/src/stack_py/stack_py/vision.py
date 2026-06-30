@@ -97,7 +97,6 @@ class Vision(Node):
     #TODO: set appropriate pipeline according to environment
     #      should use below for orin
     #      suggested values
-    #      width, height = 1440, 1080: compressed image for less bandwith
     #      fps = 30.0
     #      flip_method = 0 : no flip/rotation
     #                        use appropriate value if video orientation is not aligned
@@ -112,7 +111,7 @@ class Vision(Node):
       "application/x-rtp, encoding-name=H264 ! "
       "rtph264depay ! h264parse ! avdec_h264 ! "
       "videoconvert ! "
-      "videoscale ! video/x-raw, width=1440, height=1080 ! "
+      "videoscale ! video/x-raw, width=1280, height=720 ! "
       "appsink"
     )
 

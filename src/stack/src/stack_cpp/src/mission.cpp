@@ -55,7 +55,7 @@ class Mission : public rclcpp::Node {
 	  has_odom = true;
         });
         
-      //TODO: topic might not exist for different firmware versions
+      //TODO: the topic might not exist for different firmware versions
       vehicle_status_subscriber = this->create_subscription<VehicleStatus>("/fmu/out/vehicle_status_v1", rclcpp::SensorDataQoS(),
         [this](const VehicleStatus::SharedPtr msg) {
           armed = (msg->arming_state == VehicleStatus::ARMING_STATE_ARMED);
