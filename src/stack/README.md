@@ -21,16 +21,18 @@ Subsystem status is maintained through bit-packed state representation.
 ## Implemented Componenets
 
 - Mission Manager
-- MIssion GUI
+- Flight
+- Vision
+- Marker Detection
+- Target Guidance
 - Logger
+- MIssion GUI
 
 ---
 
 ## Planned Components
 
-- Waypoint Nav
-- Vision
-- Target Guidance
+- YOLO
 - Gripper
 
 ---

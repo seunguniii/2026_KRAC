@@ -23,6 +23,16 @@ from .mission_manager import (
     NodeState,
 )
 
+#Deleted odom_callback's vehicle attitude-camera correction
+#as the actual aircraft will use a gimbal
+#TODO: Current marker detection rate is unreliable
+#      (evaluation done in Gazebo Harmonic @ altitude < 15m)
+#      Inaccurate camera matrix might've been the cause:
+#      need evaluation of marker detection rate with an actual camera
+#      & a logic fix if needed.
+#
+#      Suggestion
+#      Add camera zoom for higher altitudes
 class Marker(Node):
     _ARUCO_DICT = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
     try:

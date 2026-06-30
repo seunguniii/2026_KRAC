@@ -19,6 +19,25 @@ using namespace std::chrono_literals;
 using namespace std_msgs::msg;
 using namespace px4_msgs::msg;
 
+//TODO: GPS navigation
+//      PX4 supports VehicleGlobalPosition : Fused WGS84
+//      Use VehicleGlobalPosition & WGS84 waypoints
+//      instead of VehicleOdometry & local NED waypoints
+//      -> set_origin() logic might not be needed
+//      -> TrajectorySetpoint uses NED coordinates
+//      OR
+//      Calculate local NED waypoints according to current WGS84
+//      and given WGS84 waypoints and use current waypoint finding logic
+//
+//TODO: Initial report shows PRISM trajectory planning logic
+//      Current code feeds discrete waypoint coordinates whereas
+//      for the aircraft to follow the planned trajectory
+//      continuous coordinates should be fed and thus needs change in flight logic
+//      Suggestion:
+//      Use ROS Service/Client before flight, similar with set_origin()
+//      and save it as current forward_waypoints.
+//      Publish trajectory coordinates without evaluating
+//      if the aircraft has arrived at the desired coordinate.
 class Flight : public rclcpp::Node {
   public:
     Flight() : Node("Flight") {
@@ -35,27 +54,23 @@ class Flight : public rclcpp::Node {
       command_subscriber = this->create_subscription<UInt32>("mission/command", 10,
         [this](const UInt32::SharedPtr msg) {
           uint32_t cmd = msg->data;
+          if(manager.get_node(cmd) != NodeName::FLIGHT) return;
+          mission_mode = manager.get_mode(cmd);
           NodeState command_state = manager.get_command(cmd);
-          if(manager.get_node(cmd) == NodeName::FLIGHT && self_state != command_state) {
-            if(command_state == NodeState::BUSY) {
-              flight_mode_ = STANDBY;
-              hold_counter_ = 0;
-              wp_idx_ = 0;
-              holding_last_wp_ = false;
+          if(self_state == command_state) return;
+          if(command_state == NodeState::BUSY) {
+            flight_mode_ = STANDBY;
+            hold_counter_ = 0;
+            wp_idx_ = 0;
+            holding_last_wp_ = false;
               
-              setWaypointOrder(mission_mode);
-              hold_position_ = waypoints_.back();
-            }
-            self_state = command_state;
-            RCLCPP_INFO(get_logger(), "Command recieved from MISSION.");
+            setWaypointOrder(mission_mode);
+            hold_position_ = waypoints_.back();
           }
+          self_state = command_state;
+          RCLCPP_INFO(get_logger(), "Command recieved from MISSION.");
         });
         
-        mission_mode_subscriber = this->create_subscription<UInt32>("mission/mode", 10,
-        [this](const UInt32::SharedPtr msg) {
-          mission_mode = static_cast<MissionMode>(msg->data);
-        });
-
       //main logic
       auto timer_callback = [this]() -> void {
         reportNodeStatus(self_state);
@@ -88,7 +103,6 @@ class Flight : public rclcpp::Node {
     rclcpp::Publisher<VehicleCommand>::SharedPtr vehicle_command_publisher;
 
     rclcpp::Subscription<UInt32>::SharedPtr command_subscriber;
-    rclcpp::Subscription<UInt32>::SharedPtr mission_mode_subscriber;
     rclcpp::Subscription<VehicleOdometry>::SharedPtr vehicle_odometry_subscriber;
 
     VehicleOdometry curr_odom_;
@@ -103,12 +117,12 @@ class Flight : public rclcpp::Node {
     FlightMode flight_mode_ = STANDBY;
     
     std::vector<std::array<float,3>> forward_waypoints = {
-      {0.0f, 0.0f, -10.0f},
-      {100.0f, 0.0f, -10.0f},
-      {200.0f, 100.0f, -10.0f},
-      {200.0f, -100.0f, -10.0f},
-      {100.0f, 0.0f, -10.0f},
-      {0.0f, 0.0f, -10.0f}
+      {0.0f, 0.0f, -15.0f},
+      {100.0f, 0.0f, -15.0f},
+      {200.0f, 100.0f, -15.0f},
+      {200.0f, -100.0f, -15.0f},
+      {100.0f, 0.0f, -15.0f},
+      {0.0f, 0.0f, -15.0f}
     };
     
     std::vector<std::array<float,3>> waypoints_ = forward_waypoints;

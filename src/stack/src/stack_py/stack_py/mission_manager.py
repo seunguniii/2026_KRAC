@@ -9,7 +9,7 @@ class MissionMode(IntEnum):
     DROP = 4
     LANDING = 5
     FINISHED = 6
-    ABORT = 100
+    ABORT = 7
 
 
 class NodeState(IntEnum):
@@ -31,11 +31,20 @@ class NodeName(IntEnum):
 
 
 class MissionManager:
+    NODE_COUNT = 8
+
     BITS_PER_NODESTATE = 2
     BITS_PER_NODE = 3
+    BITS_PER_MODE = 3
+    
+    SHIFT_NODESTATE = 0
+    SHIFT_NODE = SHIFT_NODESTATE + BITS_PER_NODESTATE
+    SHIFT_MODE = SHIFT_NODE + BITS_PER_NODE
+    SHIFT_SUMMARY_MODE = BITS_PER_NODESTATE * NODE_COUNT
 
-    MASK_NODESTATE = 0b11
-    MASK_NODE = 0b111
+    MASK_NODESTATE = (1 << BITS_PER_NODESTATE) - 1
+    MASK_NODE = (1 << BITS_PER_NODE) - 1
+    MASK_MODE = (1 << BITS_PER_MODE) - 1
 
 
     def __init__(self):
@@ -54,35 +63,54 @@ class MissionManager:
         self.data = 0
 
 
-    def set(self, node: NodeName, state: NodeState):
+    def set_mode(self, mode: MissionMode):
+        self.data &= ~(self.MASK_MODE << self.SHIFT_SUMMARY_MODE)
+        self.data |= (int(mode) & self.MASK_MODE) << self.SHIFT_SUMMARY_MODE
+        
+     
+    def get_mode(self):
+        return MissionMode((self.data >> self.SHIFT_SUMMARY_MODE) & self.MASK_MODE)
 
+
+    def set(self, node: NodeName, state: NodeState):
         shift = (int(node) * self.BITS_PER_NODESTATE)
         self.data &= ~(self.MASK_NODESTATE << shift)
-        self.data |= (int(state) << shift)
+        self.data |= ((int(state) & self.MASK_NODESTATE) << shift)
 
 
     def get(self, node: NodeName):
         shift = (int(node) * self.BITS_PER_NODESTATE)
-        value = (self.data >> shift) & self.MASK_NODESTATE
+        value = ((self.data >> shift) & self.MASK_NODESTATE)
 
         return NodeState(value)
 
 
     @staticmethod
-    def pack(node: NodeName, state: NodeState):
-        node_bits = (int(node) & MissionManager.MASK_NODE)
-        state_bits = (int(state) & MissionManager.MASK_NODESTATE)
-
-        return (
-            (node_bits << MissionManager.BITS_PER_NODESTATE)
-            | state_bits
+    def pack(node: NodeName, state: NodeState, mode: MissionMode | None = None):
+        packet = 0
+        
+        packet |= (
+            (int(state) & MissionManager.MASK_NODESTATE)
+            << MissionManager.SHIFT_NODESTATE
         )
+        packet |= (
+            (int(node) & MissionManager.MASK_NODE)
+            << MissionManager.SHIFT_NODE
+        )
+        
+        if mode is not None:
+            packet |= (
+                (int(mode) & MissionManager.MASK_MODE)
+                << MissionManager.SHIFT_MODE
+            )
+
+        return packet
 
 
     @staticmethod
     def get_node(cmd: int):
         value = (
-            (cmd >> MissionManager.BITS_PER_NODESTATE)
+            (cmd >> MissionManager.SHIFT_NODE)
             & MissionManager.MASK_NODE
         )
 
@@ -92,12 +120,20 @@ class MissionManager:
     @staticmethod
     def get_command(cmd: int):
         value = (
-            cmd
+            (cmd >> MissionManager.SHIFT_NODESTATE)
             & MissionManager.MASK_NODESTATE
         )
 
         return NodeState(value)
 
+    @staticmethod
+    def get_mode(cmd: int):
+        value = (
+            (cmd >> MissionManager.SHIFT_MODE)
+            & MissionManager.MASK_MODE
+        )
+
+        return MissionMode(value)
 
     def is_idle(self, node: NodeName):
         return (
@@ -111,14 +147,14 @@ class MissionManager:
             == NodeState.BUSY
         )
 
-    def is_completed(self, node: NodeName):
+    def is_success(self, node: NodeName):
         return (
             self.get(node)
-            == NodeState.COMPLETED
+            == NodeState.SUCCESS
         )
 
-    def is_error(self, node: NodeName):
+    def is_abort(self, node: NodeName):
         return (
             self.get(node)
-            == NodeState.ERROR
+            == NodeState.ABORT
         )

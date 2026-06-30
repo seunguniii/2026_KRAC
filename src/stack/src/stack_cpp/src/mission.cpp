@@ -18,15 +18,15 @@ using namespace std::chrono_literals;
 using namespace std_msgs::msg;
 using namespace px4_msgs::msg;
 
+
+//TODO: Initial report shows different mission altitudes for cruise, rescue & drop/land
+//      Implementation of different altitudes for each mission stages are to be done.
 class Mission : public rclcpp::Node {
   public:
     Mission() : Node("Mission") {
       //node command & state summary
       mission_command_publisher = this->create_publisher<UInt32>("mission/command", 10);
       mission_summary_publisher = this->create_publisher<UInt32>("mission/summary", 10);
-      
-      //mission mode
-      mission_mode_publisher = this->create_publisher<UInt32>("mission/mode", 10);
 
       offboard_control_mode_publisher = this->create_publisher<OffboardControlMode>("/fmu/in/offboard_control_mode", 10);
       vehicle_command_publisher = this->create_publisher<VehicleCommand>("/fmu/in/vehicle_command", 10);
@@ -106,7 +106,6 @@ class Mission : public rclcpp::Node {
         if(counter_ == 0) manager.clear();
         counter_ ++;
         publishMissionSummary();
-        publishMissionMode();
         
         if(self_state == NodeState::IDLE
            || mission_mode == MissionMode::FINISHED)
@@ -146,13 +145,6 @@ class Mission : public rclcpp::Node {
               publishMissionCommand(NodeName::VISION, NodeState::BUSY);
             }
             
-            if(manager.get(NodeName::FLIGHT) == NodeState::BUSY) {
-              RCLCPP_INFO(this->get_logger(), "All desired nodes active.");
-              RCLCPP_INFO(this->get_logger(), "MissionMode: Waypoint Flight");
-              mission_mode = MissionMode::WP_FLIGHT;
-              break;
-            }              
-            
             all_go = (manager.get(NodeName::MISSION) == NodeState::BUSY) &&
               (manager.get(NodeName::FLIGHT) == NodeState::IDLE) &&
               (manager.get(NodeName::TARGET) == NodeState::IDLE) &&
@@ -164,53 +156,49 @@ class Mission : public rclcpp::Node {
             
             if(all_go) {
               RCLCPP_WARN(this->get_logger(), "All green. Proceeding mission.");
-              
+              RCLCPP_INFO(this->get_logger(), "Configure gimbal control to offboard.");
+              //TODO: find appropriate sysid/compid for actual aircraft
+              publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_GIMBAL_MANAGER_CONFIGURE, 1, 1);
               RCLCPP_INFO(this->get_logger(), "Sending activation command to FLIGHT.");
-              publishMissionCommand(NodeName::FLIGHT, NodeState::BUSY);
+              publishMissionCommand(NodeName::FLIGHT, NodeState::BUSY, MissionMode::WP_FLIGHT);
+              
+              mission_mode = MissionMode::WP_FLIGHT;
+              RCLCPP_INFO(this->get_logger(), "MissionMode: Waypoint Flight"); 
             }
             break;
           
-          //TODO:SUCCESS tags are for test/debug.
-          //     rid SUCCESS tags once node is fully implemented
+         
           case MissionMode::WP_FLIGHT:
-            if(((manager.get(NodeName::TARGET) == NodeState::BUSY) || (manager.get(NodeName::TARGET) == NodeState::SUCCESS))
-                && ((manager.get(NodeName::GRIPPER) == NodeState::BUSY) || (manager.get(NodeName::GRIPPER) == NodeState::SUCCESS))
-                && (manager.get(NodeName::YOLO) == NodeState::BUSY))
-            {
-              RCLCPP_INFO(this->get_logger(), "All desired nodes active.");
-              mission_mode = MissionMode::RESCUE;
-              RCLCPP_INFO(this->get_logger(), "MissionMode: Rescue");
-              break;
-            }
-            
+            publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_GIMBAL_MANAGER_PITCHYAW, 0.0, 0.0, nan, nan);
+            if(manager.get(NodeName::FLIGHT) != NodeState::BUSY)
+              RCLCPP_WARN(this->get_logger(), "Some desired nodes might not be active.");
+              
             if(manager.get(NodeName::FLIGHT) == NodeState::SUCCESS) {
               RCLCPP_INFO(this->get_logger(), "Command FLIGHT to IDLE.");
               publishMissionCommand(NodeName::FLIGHT, NodeState::IDLE);
               
               RCLCPP_INFO(this->get_logger(), "Sending activation command to TARGET.");
-              publishMissionCommand(NodeName::TARGET, NodeState::BUSY);
+              publishMissionCommand(NodeName::TARGET, NodeState::BUSY, MissionMode::RESCUE);
               RCLCPP_INFO(this->get_logger(), "Sending activation command to GRIPPER.");
-              publishMissionCommand(NodeName::GRIPPER, NodeState::BUSY);
+              publishMissionCommand(NodeName::GRIPPER, NodeState::BUSY, MissionMode::RESCUE);
               RCLCPP_INFO(this->get_logger(), "Sending activation command to YOLO.");
               publishMissionCommand(NodeName::YOLO, NodeState::BUSY);
               
-              //TODO: find appropriate system/component id.
-              publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_GIMBAL_MANAGER_CONFIGURE, 1, 1);
-              publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_GIMBAL_MANAGER_PITCHYAW, -90.0, 0.0);
+              mission_mode = MissionMode::RESCUE;
+              RCLCPP_INFO(this->get_logger(), "MissionMode: Rescue");
             }
             break;
           
           
           case MissionMode::RESCUE:
-            if(manager.get(NodeName::FLIGHT) == NodeState::BUSY)
-            {
-              RCLCPP_INFO(this->get_logger(), "All desired nodes active.");
-              mission_mode = MissionMode::INVERSE_WP_FLIGHT;
-              RCLCPP_INFO(this->get_logger(), "MissionMode: Inverse Waypoint Flight.");
-              //TODO: set gimbal pitch according to desired view
-              publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_GIMBAL_MANAGER_PITCHYAW, 0.0, 0.0);
-              break;
-            }
+            publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_GIMBAL_MANAGER_PITCHYAW, -90.0, 0.0, nan, nan);
+            //TODO:SUCCESS tags are for test/debug.
+            //     rid SUCCESS tags once node is fully implemented
+            if(((manager.get(NodeName::TARGET) != NodeState::BUSY) && (manager.get(NodeName::TARGET) != NodeState::SUCCESS))
+                  || ((manager.get(NodeName::GRIPPER) != NodeState::BUSY) && (manager.get(NodeName::GRIPPER) == NodeState::SUCCESS))
+                  || (manager.get(NodeName::YOLO) != NodeState::BUSY))
+                RCLCPP_WARN(this->get_logger(), "Some desired nodes might not be active.");
+                
             if(manager.get(NodeName::TARGET) == NodeState::SUCCESS &&
                manager.get(NodeName::GRIPPER) == NodeState::SUCCESS)
             {
@@ -222,53 +210,47 @@ class Mission : public rclcpp::Node {
               publishMissionCommand(NodeName::YOLO, NodeState::IDLE);
           
               RCLCPP_INFO(this->get_logger(), "Sending activation command to FLIGHT.");
-              publishMissionCommand(NodeName::FLIGHT, NodeState::BUSY);
+              publishMissionCommand(NodeName::FLIGHT, NodeState::BUSY, MissionMode::INVERSE_WP_FLIGHT);
+                            
+              mission_mode = MissionMode::INVERSE_WP_FLIGHT;
+              RCLCPP_INFO(this->get_logger(), "MissionMode: Inverse Waypoint Flight.");
             }
             break;
           
-          //TODO:SUCCESS tags are for test/debug.
-          //     rid SUCCESS tags once node is fully implemented
+          
           case MissionMode::INVERSE_WP_FLIGHT:
-            if(((manager.get(NodeName::TARGET) == NodeState::BUSY) || (manager.get(NodeName::TARGET) == NodeState::SUCCESS))
-                && ((manager.get(NodeName::GRIPPER) == NodeState::BUSY) || (manager.get(NodeName::GRIPPER) == NodeState::SUCCESS))
-                && (manager.get(NodeName::YOLO) == NodeState::BUSY))
-            {
-              RCLCPP_INFO(this->get_logger(), "All desired nodes active.");
-              mission_mode = MissionMode::DROP;
-              RCLCPP_INFO(this->get_logger(), "MissionMode: Drop");
-              break;
-            }
+            publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_GIMBAL_MANAGER_PITCHYAW, 0.0, 0.0, nan, nan);
+            if(manager.get(NodeName::FLIGHT) != NodeState::BUSY)
+              RCLCPP_WARN(this->get_logger(), "Some desired nodes might not be active.");
+              
             if(manager.get(NodeName::FLIGHT) == NodeState::SUCCESS) {
               RCLCPP_INFO(this->get_logger(), "Command FLIGHT to IDLE.");
               publishMissionCommand(NodeName::FLIGHT, NodeState::IDLE);
               
               RCLCPP_INFO(this->get_logger(), "Sending activation command to TARGET.");
-              publishMissionCommand(NodeName::TARGET, NodeState::BUSY);
+              publishMissionCommand(NodeName::TARGET, NodeState::BUSY, MissionMode::DROP);
               RCLCPP_INFO(this->get_logger(), "Sending activation command to GRIPPER.");
-              publishMissionCommand(NodeName::GRIPPER, NodeState::BUSY);
+              publishMissionCommand(NodeName::GRIPPER, NodeState::BUSY, MissionMode::DROP);
               RCLCPP_INFO(this->get_logger(), "Sending activation command to YOLO.");
               publishMissionCommand(NodeName::YOLO, NodeState::BUSY);
               
-              //TODO: use appropriate id for system/component for actual aircraft
-              //primary control: 1/1, offboard node
-              publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_GIMBAL_MANAGER_CONFIGURE, 1, 1);
-              publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_GIMBAL_MANAGER_PITCHYAW, -90.0, 0.0);
+              mission_mode = MissionMode::DROP;
+              RCLCPP_INFO(this->get_logger(), "MissionMode: Drop");
             }
             break;
           
           //TODO: SUCCESS tags are for test/debug
           //     rid SUCCESS tags once node is fully implemented
-          case MissionMode::DROP:            
-            if(((manager.get(NodeName::TARGET) == NodeState::BUSY) || (manager.get(NodeName::TARGET) == NodeState::SUCCESS))
-                && (manager.get(NodeName::MARKER) == NodeState::BUSY))
-            {
-              RCLCPP_INFO(this->get_logger(), "All desired nodes active.");
-              mission_mode = MissionMode::LANDING;
-              RCLCPP_INFO(this->get_logger(), "MissionMode: Landing");
-              //TODO: set gimbal pitch according to desired view
-              publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_GIMBAL_MANAGER_PITCHYAW, 0.0, 0.0);
-              break;
-            }
+          case MissionMode::DROP:
+            publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_GIMBAL_MANAGER_PITCHYAW, -90.0, 0.0, nan, nan);
+            
+            //TODO:SUCCESS tags are for test/debug.
+            //     rid SUCCESS tags once node is fully implemented
+            if(((manager.get(NodeName::TARGET) != NodeState::BUSY) && (manager.get(NodeName::TARGET) != NodeState::SUCCESS))
+                || ((manager.get(NodeName::GRIPPER) == NodeState::BUSY) && (manager.get(NodeName::GRIPPER) != NodeState::SUCCESS))
+                || (manager.get(NodeName::YOLO) != NodeState::BUSY))
+                RCLCPP_WARN(this->get_logger(), "Some desired nodes might not be active.");
+          
             if(manager.get(NodeName::TARGET) == NodeState::SUCCESS &&
                manager.get(NodeName::GRIPPER) == NodeState::SUCCESS)
             {
@@ -280,13 +262,23 @@ class Mission : public rclcpp::Node {
               publishMissionCommand(NodeName::YOLO, NodeState::IDLE);
           
               RCLCPP_INFO(this->get_logger(), "Sending activation command to TARGET.");
-              publishMissionCommand(NodeName::TARGET, NodeState::BUSY);
+              publishMissionCommand(NodeName::TARGET, NodeState::BUSY, MissionMode::LANDING);
               RCLCPP_INFO(this->get_logger(), "Sending activation command to MARKER.");
               publishMissionCommand(NodeName::MARKER, NodeState::BUSY);
+              
+              mission_mode = MissionMode::LANDING;
+              RCLCPP_INFO(this->get_logger(), "MissionMode: Landing");
+              //TODO: set gimbal pitch according to desired view
             }
             break;
           
           case MissionMode::LANDING:
+            publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_GIMBAL_MANAGER_PITCHYAW, -90.0, 0.0, nan, nan);
+            
+            if(((manager.get(NodeName::TARGET) != NodeState::BUSY) && (manager.get(NodeName::TARGET) != NodeState::SUCCESS))
+                || (manager.get(NodeName::MARKER) != NodeState::BUSY))
+              RCLCPP_WARN(this->get_logger(), "Some desired nodes might not be active.");
+          
             if(manager.get(NodeName::TARGET) == NodeState::SUCCESS) {
               RCLCPP_INFO(this->get_logger(), "Command MARKER to IDLE.");
               publishMissionCommand(NodeName::MARKER, NodeState::IDLE);
@@ -302,13 +294,13 @@ class Mission : public rclcpp::Node {
             if(!armed){
               publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1.0f, 3.0f);
               mission_mode = MissionMode::IDLE;
+              idle();
               return;
             }
             if(landed){
               RCLCPP_INFO(this->get_logger(), "Disarming vehicle.");
               disarm();
             }
-            idle();
             break;
 
           case MissionMode::ABORT:
@@ -327,7 +319,6 @@ class Mission : public rclcpp::Node {
     
     rclcpp::Publisher<UInt32>::SharedPtr mission_command_publisher;
     rclcpp::Publisher<UInt32>::SharedPtr mission_summary_publisher;
-    rclcpp::Publisher<UInt32>::SharedPtr mission_mode_publisher;
     rclcpp::Publisher<VehicleCommand>::SharedPtr vehicle_command_publisher;
     rclcpp::Publisher<OffboardControlMode>::SharedPtr offboard_control_mode_publisher;
     
@@ -357,7 +348,7 @@ class Mission : public rclcpp::Node {
 
     void publishMissionSummary();
     void publishMissionCommand(NodeName node, NodeState state);
-    void publishMissionMode();
+    void publishMissionCommand(NodeName node, NodeState state, MissionMode mode);
     
     void publishOffboardControlMode();
     void publishVehicleCommand(uint16_t command, float param1 = 0.0, float param2 = 0.0, float param3 = 0.0, float param4 = 0.0);
@@ -427,21 +418,22 @@ void Mission::abort() {
   RCLCPP_WARN(this->get_logger(), "Mission successfully aborted.");    
 }
 
-void Mission::publishMissionMode() {
-  std_msgs::msg::UInt32 msg;
-  msg.data = static_cast<int>(mission_mode);
-  mission_mode_publisher -> publish(msg);
-}
-
 void Mission::publishMissionSummary() {
   std_msgs::msg::UInt32 msg;
+  manager.set_mode(mission_mode);
   msg.data = manager.raw();
   mission_summary_publisher -> publish(msg);
 }
 
 void Mission::publishMissionCommand(NodeName node, NodeState state) {
   std_msgs::msg::UInt32 msg;
-  msg.data = manager.pack(node, state);
+  msg.data = manager.pack(node, state, mission_mode);
+  mission_command_publisher -> publish(msg);
+}
+
+void Mission::publishMissionCommand(NodeName node, NodeState state, MissionMode mode) {
+  std_msgs::msg::UInt32 msg;
+  msg.data = manager.pack(node, state, mode);
   mission_command_publisher -> publish(msg);
 }
 

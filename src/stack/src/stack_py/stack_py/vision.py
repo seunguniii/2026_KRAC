@@ -12,7 +12,11 @@ from .mission_manager import (
   NodeState,
 )
 
-
+#TODO: currently image frames are shared via ROS topics
+#      creates unnecessary processes for serialize/desirializing frames
+#      if problems such as excessive badnwith occur, 
+#      use local ports using gstreamer tee at udp port 5600 etc.
+#      ...or merge vision, marker and yolo node into a single node
 class Vision(Node):
   def __init__(self):
     super().__init__('vision')
@@ -83,11 +87,6 @@ class Vision(Node):
       msg.data = encoded.tobytes()
       self.image_publisher.publish(msg)
 
-    #local debug
-    #cv2.imshow("Drone View", frame)
-    #cv2.waitKey(1)
-
-
   def stop(self):
     if self._cap:
       self._cap.release()
@@ -95,12 +94,25 @@ class Vision(Node):
 
 
   def open_camera(self):
+    #TODO: set appropriate pipeline according to environment
+    #      should use below for orin
+    #      suggested values
+    #      width, height = 1440, 1080: compressed image for less bandwith
+    #      fps = 30.0
+    #      flip_method = 0 : no flip/rotation
+    #                        use appropriate value if video orientation is not aligned
+    #pipeline = (
+    #  "nvarguscamerasrc sensor-id=0 ! "
+    #  "video/x-raw(memory:NVMM), width={width}, height={height},format=NV12,framerate={fps}/1 ! "
+    #  "nvvidconv flip-method={flip_method} !"
+    #  "video/x-raw,format=BGRx ! videoconvert ! video/x-raw,format BGR ! appsink"
+    #)
     pipeline = (
       "udpsrc port=5600 ! "
       "application/x-rtp, encoding-name=H264 ! "
       "rtph264depay ! h264parse ! avdec_h264 ! "
       "videoconvert ! "
-      "videoscale ! video/x-raw, width=640, height=480 ! "
+      "videoscale ! video/x-raw, width=1440, height=1080 ! "
       "appsink"
     )
 

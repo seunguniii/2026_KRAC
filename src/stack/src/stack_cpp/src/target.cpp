@@ -43,16 +43,13 @@ class Target : public rclcpp::Node {
       trajectory_setpoint_publisher = this->create_publisher<TrajectorySetpoint>("/fmu/in/trajectory_setpoint", 10);
       vehicle_command_publisher = this->create_publisher<VehicleCommand>("/fmu/in/vehicle_command", 10);
       
-      mission_mode_subscriber = this->create_subscription<UInt32>("mission/mode", 10,
-        [this](const UInt32::SharedPtr msg) {
-          mission_mode = static_cast<MissionMode>(msg->data);
-        });
-      
       command_subscriber = this->create_subscription<UInt32>("mission/command", 10,
         [this](const UInt32::SharedPtr msg) {
           uint32_t cmd = msg->data;
+        if(manager.get_node(cmd) != NodeName::TARGET) return; 
+          mission_mode = manager.get_mode(cmd);
           NodeState command_state = manager.get_command(cmd);
-          if(manager.get_node(cmd) == NodeName::TARGET && self_state != command_state) {
+          if(self_state != command_state) {
             self_state = command_state;
             RCLCPP_INFO(get_logger(), "Command recieved from MISSION.");
           }
@@ -70,7 +67,7 @@ class Target : public rclcpp::Node {
         [this](const Quaternion::SharedPtr msg) {
           desired_x_ = msg->x;   // right(+), [m]
           desired_y_ = msg->y;   // forward(+), [m]
-          acc_alt_ = msg->z;     // existing convention
+          acc_alt_ = msg->z;     // up(+), [m]
           desired_yaw_ = msg->w; // use for RESCUE
         });
 
@@ -102,7 +99,6 @@ class Target : public rclcpp::Node {
     rclcpp::Publisher<VehicleCommand>::SharedPtr vehicle_command_publisher;
 
     rclcpp::Subscription<UInt32>::SharedPtr command_subscriber;
-    rclcpp::Subscription<UInt32>::SharedPtr mission_mode_subscriber;
     rclcpp::Subscription<VehicleOdometry>::SharedPtr odometry_subscriber;
     rclcpp::Subscription<geometry_msgs::msg::Quaternion>::SharedPtr target_subscriber;
 
@@ -119,7 +115,7 @@ class Target : public rclcpp::Node {
     float desired_x_ = 0.0f;  // right(+), [m]
     float desired_y_ = 0.0f;  // forward(+), [m]
     float desired_yaw_ = 0.0f; //North 0, CCW(+), [rad]
-    float acc_alt_ = 0.0f;
+    float acc_alt_ = 0.0f;    // up(+), [m]
 
     int lost_count_ = 0;
     int hold_counter_ = 0;
@@ -146,7 +142,7 @@ class Target : public rclcpp::Node {
     float descent_mid_mps_ = 0.30f;
     float descent_low_mps_ = 0.20f;
 
-    float low_enough_ = -0.7f;
+    float low_enough_ = 0.7f; //up (+), [m]
 
     bool use_q_inverse_ = false;
 
@@ -271,6 +267,7 @@ void Target::read_parameters() {
 // msg.timestamp = ...;
 // trajectory_setpoint_publisher -> publish(msg);
 //
+//
 //another suggestion: build different classes for different mission modes
 //
 //i.e.
@@ -282,14 +279,13 @@ void Target::read_parameters() {
 void Target::timer_callback() {
   switch(mission_mode){
     case MissionMode::LANDING:
-      RCLCPP_WARN(this->get_logger(),"landing");
       land();
       break;
       
     case MissionMode::RESCUE:
     case MissionMode::DROP:
-    default:
       self_state = NodeState::SUCCESS;
+    default:
       break;
   }
   offboard_setpoint_counter_++;
@@ -436,7 +432,7 @@ void Target::land() {
   if (
     valid_xy &&
     hold_counter_ >= align_need_ &&
-    acc_alt_ > low_enough_ &&
+    acc_alt_ < low_enough_ &&
     !nav_land_sent_) {
     publish_vehicle_command(VehicleCommand::VEHICLE_CMD_NAV_LAND);
 

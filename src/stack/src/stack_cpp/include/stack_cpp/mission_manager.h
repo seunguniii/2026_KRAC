@@ -10,7 +10,7 @@ enum class MissionMode {
   DROP = 4,
   LANDING = 5,
   FINISHED = 6,
-  ABORT = 100
+  ABORT = 7
 };
     
 enum class NodeState : uint32_t {
@@ -37,24 +37,38 @@ class MissionManager{
     
     //used by master
     void set(NodeName node, NodeState state);
-    
-    //used by slaves
-    NodeName get_node(uint32_t cmd);
-    NodeState get_command(uint32_t cmd);
-    
-    //used by both
-    uint32_t pack(NodeName node, NodeState state);	//master commands, slaves report
-    NodeState get(NodeName node) const;			//slaves only use on themselves
+    uint32_t pack(NodeName node, NodeState state, MissionMode mode) const;	//master commands
+    void set_mode(MissionMode mode);
     
     void clear();
     uint32_t raw() const;
     
+    //used by slaves
+    NodeName get_node(uint32_t cmd);
+    NodeState get_command(uint32_t cmd);
+    uint32_t pack(NodeName node, NodeState state) const;	//slaves report
+    MissionMode get_mode(uint32_t cmd);
+    
+    //used by both
+    NodeState get(NodeName node) const;				//slaves only use on themselves
+    MissionMode get_mode() const;
+    
   private:
     uint32_t data;
+    static constexpr uint32_t NODE_COUNT = 8;
     
     static constexpr uint32_t BITS_PER_NODESTATE = 2;	//bits per NodeState
     static constexpr uint32_t BITS_PER_NODE = 3;	//bits per Node
-    static constexpr uint32_t MASK_NODESTATE = 0b11;	//2^(bits per NodeState) - 1
-    static constexpr uint32_t MASK_NODE = 0b111;	//2^(bits per Node) - 1
+    static constexpr uint32_t BITS_PER_MODE = 3;	//bits per MissionMode
+    
+    static constexpr uint32_t SHIFT_NODESTATE = 0;
+    static constexpr uint32_t SHIFT_NODE = SHIFT_NODESTATE + BITS_PER_NODESTATE;
+    static constexpr uint32_t SHIFT_MODE = SHIFT_NODE + BITS_PER_NODE;
+    static constexpr uint32_t SHIFT_SUMMARY_MODE = NODE_COUNT * BITS_PER_NODESTATE;
+    
+    static constexpr uint32_t MASK_NODESTATE = (1u << BITS_PER_NODESTATE) - 1;
+    static constexpr uint32_t MASK_NODE = (1u << BITS_PER_NODE) - 1;
+    static constexpr uint32_t MASK_MODE = (1u << BITS_PER_MODE) - 1;
+    
     static constexpr uint32_t MAX_NODES = 16;
 };
