@@ -354,13 +354,8 @@ void Target::land() {
     //TODO: suggestion; land at current position?
     RCLCPP_WARN(
       this->get_logger(),
-      "[LANDING] target lost too long -> switch PX4 to POSITION mode");
-
-    publish_vehicle_command(
-      VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1.0f, 3.0f
-    );
-
-    self_state = NodeState::SUCCESS;
+      "[LANDING] Lost Target. Setting node state to ABORT.");
+    self_state = NodeState::ABORT;
     return;
   }
 
