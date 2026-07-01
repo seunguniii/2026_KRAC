@@ -293,7 +293,6 @@ class Mission : public rclcpp::Node {
           case MissionMode::FINISHED:
             if(!armed){
               publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1.0f, 3.0f);
-              mission_mode = MissionMode::IDLE;
               idle();
               return;
             }
@@ -341,7 +340,7 @@ class Mission : public rclcpp::Node {
     NodeState self_state = NodeState::IDLE;
     
     int counter_ = 0;
-    int num_of_nodes = static_cast<int>(NodeName::LOGGER);
+    int num_of_nodes = static_cast<int>(NodeName::LOGGER) + 1;
     
     bool has_odom = false;
     bool all_go = false;
@@ -358,6 +357,7 @@ class Mission : public rclcpp::Node {
     void arm();
     void disarm();
     
+    bool skipStatusEval(NodeName node);
     bool aborted = false;
     void abort();
 
@@ -368,16 +368,26 @@ class Mission : public rclcpp::Node {
     float nan = std::numeric_limits<float>::quiet_NaN();
 };
 
+
+bool Mission::skipStatusEval(NodeName node) {
+  return (
+    (node == NodeName::MISSION)
+    || (node == NodeName::VISION)
+    || (node == NodeName::LOGGER)
+  );
+}
+
+
 void Mission::idle() {
   for(int i = 0; i < num_of_nodes; i++) {
-    //mission node's state is directly modified by ground/command callback
     NodeName node = static_cast<NodeName>(i + 1);
     publishMissionCommand(node, NodeState::IDLE);
   }
   
-  for(int i = 0; i < num_of_nodes + 1; i++) {
+  
+  for(int i = 0; i < num_of_nodes; i++) {
     NodeName node = static_cast<NodeName>(i);
-    if(manager.get(node) != NodeState::IDLE){
+     if(manager.get(node) != NodeState::IDLE){
       RCLCPP_WARN(this->get_logger(), "Some nodes might still be active.");
       RCLCPP_WARN(this->get_logger(), "Trying to kill all remaining nodes...");
       return;
@@ -390,20 +400,15 @@ void Mission::idle() {
 void Mission::abort() {
   if(aborted) return;
   
-  mission_mode = MissionMode::ABORT;
-  
   for(int i = 0; i < num_of_nodes; i++) {
-    //mission node's state is directly modified by ground/command callback
-    NodeName node = static_cast<NodeName>(i + 1);
-    
-    //leave video on
-    if(node != NodeName::VISION)
+    NodeName node = static_cast<NodeName>(i);
+    if(!skipStatusEval(node))
       publishMissionCommand(node, NodeState::ABORT);
   }
   
-  for(int i = 0; i < num_of_nodes + 1; i++) {
+  for(int i = 0; i < num_of_nodes; i++) {
     NodeName node = static_cast<NodeName>(i);
-    if(node != NodeName::VISION) {
+    if(!skipStatusEval(node)) {
       if(manager.get(node) != NodeState::ABORT){
         RCLCPP_WARN(this->get_logger(), "Some nodes might still be active.");
         RCLCPP_WARN(this->get_logger(), "Trying to kill all remaining nodes...");
@@ -411,6 +416,7 @@ void Mission::abort() {
       }
     }
   }
+  
   //if aborted set as position mode
   publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1.0f, 3.0f);
 
@@ -437,6 +443,7 @@ void Mission::publishMissionCommand(NodeName node, NodeState state, MissionMode 
   mission_command_publisher -> publish(msg);
 }
 
+
 bool Mission::needVelocityControl() {
   return (mission_mode == MissionMode::LANDING
           || mission_mode == MissionMode::RESCUE
@@ -445,8 +452,6 @@ bool Mission::needVelocityControl() {
 
 void Mission::publishOffboardControlMode() {
   OffboardControlMode msg {};
-  //TODO: set position to "false" if landing / target guidance is done via velocity
-  //      should be "true" for waypoint flights
   msg.position = needVelocityControl()? false:true;
   msg.velocity = true;
   msg.acceleration = false;
