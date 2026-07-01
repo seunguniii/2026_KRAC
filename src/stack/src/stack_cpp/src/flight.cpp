@@ -117,12 +117,12 @@ class Flight : public rclcpp::Node {
     FlightMode flight_mode_ = STANDBY;
     
     std::vector<std::array<float,3>> forward_waypoints = {
-      {0.0f, 0.0f, -15.0f},
-      {100.0f, 0.0f, -15.0f},
-      {200.0f, 100.0f, -15.0f},
-      {200.0f, -100.0f, -15.0f},
-      {100.0f, 0.0f, -15.0f},
-      {0.0f, 0.0f, -15.0f}
+      {0.0f, 0.0f, -10.0f},
+      {100.0f, 0.0f, -10.0f},
+      {200.0f, 100.0f, -10.0f},
+      {200.0f, -100.0f, -10.0f},
+      {100.0f, 0.0f, -10.0f},
+      {0.0f, 0.0f, -10.0f}
     };
     
     std::vector<std::array<float,3>> waypoints_ = forward_waypoints;
