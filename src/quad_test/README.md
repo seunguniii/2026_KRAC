@@ -2,20 +2,15 @@
 
 ---
 
-## Evaluation Elements
+## flight_test
 
-- Euler Angles (Pitch, Roll, Yaw)
+###Evaluation Elements
+
+- Euler Angles (Pitch, Roll)
 - Setpoint Accuracy
-
----
-
-## Origin
-
 - Sets takeoff coordinate as local origin
 
----
-
-## Expected Behavior
+### Expected Behavior
 
 - Takeoff @ altitude 2m with yaw = 0.0 (North)
 - Go forwards 2m, backwards 2m (pitch)
@@ -24,6 +19,14 @@
 - Land
 
 ![flight_test_demo.gif](materials/quad_flight_test_demo.gif)
+
+---
+
+##gps_test
+
+- LLA coordinate based flight
+- !IMPORTANT!
+-- Set waypoints to desired LLA coordinates before flight.
 
 ---
 

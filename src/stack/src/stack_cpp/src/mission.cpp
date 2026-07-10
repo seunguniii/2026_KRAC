@@ -169,7 +169,7 @@ class Mission : public rclcpp::Node {
           
          
           case MissionMode::WP_FLIGHT:
-            publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_GIMBAL_MANAGER_PITCHYAW, 0.0, 0.0, nan, nan);
+            publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_GIMBAL_MANAGER_PITCHYAW, 0.0, 0.0, nan, nan, gimbal_device_flag);
             if(manager.get(NodeName::FLIGHT) != NodeState::BUSY)
               RCLCPP_WARN(this->get_logger(), "Some desired nodes might not be active.");
               
@@ -191,7 +191,7 @@ class Mission : public rclcpp::Node {
           
           
           case MissionMode::RESCUE:
-            publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_GIMBAL_MANAGER_PITCHYAW, -90.0, 0.0, nan, nan);
+            publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_GIMBAL_MANAGER_PITCHYAW, -90.0, 0.0, nan, nan, gimbal_device_flag);
             //TODO:SUCCESS tags are for test/debug.
             //     rid SUCCESS tags once node is fully implemented
             if(((manager.get(NodeName::TARGET) != NodeState::BUSY) && (manager.get(NodeName::TARGET) != NodeState::SUCCESS))
@@ -219,7 +219,7 @@ class Mission : public rclcpp::Node {
           
           
           case MissionMode::INVERSE_WP_FLIGHT:
-            publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_GIMBAL_MANAGER_PITCHYAW, 0.0, 0.0, nan, nan);
+            publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_GIMBAL_MANAGER_PITCHYAW, 0.0, 0.0, nan, nan, gimbal_device_flag);
             if(manager.get(NodeName::FLIGHT) != NodeState::BUSY)
               RCLCPP_WARN(this->get_logger(), "Some desired nodes might not be active.");
               
@@ -242,7 +242,7 @@ class Mission : public rclcpp::Node {
           //TODO: SUCCESS tags are for test/debug
           //     rid SUCCESS tags once node is fully implemented
           case MissionMode::DROP:
-            publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_GIMBAL_MANAGER_PITCHYAW, -90.0, 0.0, nan, nan);
+            publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_GIMBAL_MANAGER_PITCHYAW, -90.0, 0.0, nan, nan, gimbal_device_flag);
             
             //TODO:SUCCESS tags are for test/debug.
             //     rid SUCCESS tags once node is fully implemented
@@ -273,7 +273,7 @@ class Mission : public rclcpp::Node {
             break;
           
           case MissionMode::LANDING:
-            publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_GIMBAL_MANAGER_PITCHYAW, -90.0, 0.0, nan, nan);
+            publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_GIMBAL_MANAGER_PITCHYAW, -90.0, 0.0, nan, nan, gimbal_device_flag);
             
             if(((manager.get(NodeName::TARGET) != NodeState::BUSY) && (manager.get(NodeName::TARGET) != NodeState::SUCCESS))
                 || (manager.get(NodeName::MARKER) != NodeState::BUSY))
@@ -350,7 +350,9 @@ class Mission : public rclcpp::Node {
     void publishMissionCommand(NodeName node, NodeState state, MissionMode mode);
     
     void publishOffboardControlMode();
-    void publishVehicleCommand(uint16_t command, float param1 = 0.0, float param2 = 0.0, float param3 = 0.0, float param4 = 0.0);
+    void publishVehicleCommand(uint16_t command, float param1 = 0.0, float param2 = 0.0, float param3 = 0.0, float param4 = 0.0, float param5 = 0.0);
+    
+    int gimbal_device_flag = 0b0000101100; //roll, pitch lock to earth, yaw lock to vehicle
     
     bool armed = false;
     bool landed = false;
@@ -461,12 +463,13 @@ void Mission::publishOffboardControlMode() {
   offboard_control_mode_publisher->publish(msg);
 }
 
-void Mission::publishVehicleCommand(uint16_t command, float param1, float param2, float param3, float param4) {
+void Mission::publishVehicleCommand(uint16_t command, float param1, float param2, float param3, float param4, float param5) {
   VehicleCommand msg {};
   msg.param1 = param1;
   msg.param2 = param2;
   msg.param3 = param3;
   msg.param4 = param4;
+  msg.param5 = param5;
   msg.command = command;
   msg.target_system = 1;
   msg.target_component = 1;
