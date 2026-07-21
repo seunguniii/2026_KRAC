@@ -1,6 +1,13 @@
 from launch import LaunchDescription
 from launch_ros.actions import Node
 
+from ament_index_python.packages import get_package_share_directory
+import os
+
+pkg_share = get_package_share_directory("mission_launch")
+
+flight = os.path.join(pkg_share, "config", "flight.yaml")
+trajectory = os.path.join(pkg_share, "config", "trajectory.yaml")
 
 def generate_launch_description():
   return LaunchDescription([
@@ -15,6 +22,9 @@ def generate_launch_description():
     Node(
       package='stack_cpp',
       executable='flight',
+      parameters=[
+        {"trajectory_dir": trajectory},
+      ],
       name='flight',
       output='screen',
       emulate_tty=True

@@ -1,7 +1,9 @@
 #include <iostream>
+#include <algorithm>
+#include <yaml-cpp/yaml.h>
+
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
-#include <algorithm>
 
 #include "rclcpp/rclcpp.hpp"
 
@@ -29,15 +31,20 @@ using namespace px4_msgs::msg;
 //      Calculate local NED waypoints according to current WGS84
 //      and given WGS84 waypoints and use current waypoint finding logic
 //
-//TODO: Initial report shows PRISM trajectory planning logic
-//      Current code feeds discrete waypoint coordinates whereas
+//TODO: Current code feeds discrete waypoint coordinates whereas
+//      continuous coordinates should be fed 
 //      for the aircraft to follow the planned trajectory
-//      continuous coordinates should be fed and thus needs change in flight logic
+//      and thus needs change in flight logic
+//
+//      Suggestion Objected:
+//      PRISM code is heavy and takes long to run; needs to be run before mission starts
+//      Instead use .yaml to feed generated trajectory setpoints
 //      Suggestion:
 //      Use ROS Service/Client before flight, similar with set_origin()
 //      and save it as current forward_waypoints.
 //      Publish trajectory coordinates without evaluating
 //      if the aircraft has arrived at the desired coordinate.
+
 class Flight : public rclcpp::Node {
   public:
     Flight() : Node("Flight") {
@@ -61,16 +68,24 @@ class Flight : public rclcpp::Node {
           if(command_state == NodeState::BUSY) {
             flight_mode_ = STANDBY;
             hold_counter_ = 0;
-            wp_idx_ = 0;
-            holding_last_wp_ = false;
+            sp_idx_ = 0;
+            holding_last_sp_ = false;
               
-            setWaypointOrder(mission_mode);
-            hold_position_ = waypoints_.back();
+            setSetpointOrder(mission_mode);
+            hold_position_ = setpoints_.back();
           }
           self_state = command_state;
           RCLCPP_INFO(get_logger(), "Command recieved from MISSION.");
-        });
-        
+        }
+      );
+      
+      
+      //get trajectory file's directory via parameter
+      this->declare_parameter<std::string>("trajectory_dir", "");
+      this->get_parameter("trajectory_dir", trajectory_dir_);
+      initSetpoints();
+      
+      
       //main logic
       auto timer_callback = [this]() -> void {
         reportNodeStatus(self_state);
@@ -116,24 +131,23 @@ class Flight : public rclcpp::Node {
 
     FlightMode flight_mode_ = STANDBY;
     
-    std::vector<std::array<float,3>> forward_waypoints = {
-      {0.0f, 0.0f, -10.0f},
-      {100.0f, 0.0f, -10.0f},
-      {200.0f, 100.0f, -10.0f},
-      {200.0f, -100.0f, -10.0f},
-      {100.0f, 0.0f, -10.0f},
-      {0.0f, 0.0f, -10.0f}
-    };
+    std::string trajectory_dir_;
+    std::vector<std::array<float,3>> parseSetpoints(YAML::Node cf);
+    std::vector<std::array<float,3>> forward_setpoints;
+    std::vector<std::array<float,3>> setpoints_;
+    void initSetpoints();
+    bool passedSetpoint(float x1, float y1, float x2, float y2, float x_curr, float y_curr);
     
-    std::vector<std::array<float,3>> waypoints_ = forward_waypoints;
+    void setSetpointOrder(MissionMode mode);
     
-    void setWaypointOrder(MissionMode mode);
-    
-    std::array<float,3>hold_position_ = forward_waypoints.back();
-    bool holding_last_wp_ = false;
+    std::array<float,3>hold_position_ = {0.0f, 0.0f, 0.0f};
+    bool holding_last_sp_ = false;
 
     uint64_t offboard_setpoint_counter_ {0};
-    size_t wp_idx_ {0};
+    size_t sp_idx_ {0};
+    int indexStep();
+    int index_step = 1;
+    bool same_coordinates_(float x1, float y1, float x2, float y2, float eps);
 
     int hold_counter_ = 0;
     const int HOLD_THRESHOLD = 20;
@@ -143,6 +157,7 @@ class Flight : public rclcpp::Node {
     void transition(FlightMode mode = MULTIROTOR);
 
     float k = 1;
+    float cross_k = 0.001*k;
     
     void set_origin();
     float origin[3] = {0, 0, 0};
@@ -156,20 +171,44 @@ class Flight : public rclcpp::Node {
     void reportNodeStatus(NodeState state);
 };
 
-
 void Flight::reportNodeStatus(NodeState state) {
   std_msgs::msg::UInt32 msg;
   msg.data = manager.pack(NodeName::FLIGHT, state);
   status_publisher -> publish(msg);
 }
 
+//helper for trajectory initialization
+std::vector<std::array<float, 3>> Flight::parseSetpoints(YAML::Node cf) {
+  std::vector<std::array<float, 3>> sps;
+  for (const auto& sp : cf["setpoints"]){
+    sps.push_back({
+      sp["n"].as<float>(), 
+      sp["e"].as<float>(),
+      sp["d"].as<float>()
+    });
+  }
+  
+  return sps;
+}
 
-void Flight::setWaypointOrder(MissionMode mode) {
-    if (mode == MissionMode::WP_FLIGHT) waypoints_ = forward_waypoints;
+void Flight::initSetpoints() {
+  YAML::Node config = YAML::LoadFile(trajectory_dir_);
+  
+  forward_setpoints.clear();
+  forward_setpoints = parseSetpoints(config);
+  setpoints_ = forward_setpoints;
+  
+  hold_position_ = forward_setpoints.back();
+  
+  RCLCPP_INFO(this->get_logger(), "Done parsing trajectory setpoints.");
+}
+
+void Flight::setSetpointOrder(MissionMode mode) {
+    if (mode == MissionMode::WP_FLIGHT) setpoints_ = forward_setpoints;
     else if (mode == MissionMode::INVERSE_WP_FLIGHT) {
-        holding_last_wp_ = false;
-        waypoints_ = forward_waypoints;
-        std::reverse(waypoints_.begin(), waypoints_.end());
+        holding_last_sp_ = false;
+        setpoints_ = forward_setpoints;
+        std::reverse(setpoints_.begin(), setpoints_.end());
     }
     else self_state = NodeState::ABORT;
 }
@@ -181,24 +220,24 @@ void Flight::publishTrajectorySetpoint() {
 
   Eigen::Vector3f current(curr_odom_.position[0], curr_odom_.position[1], curr_odom_.position[2]);
   
-  std::array<float,3> target_wp = holding_last_wp_? hold_position_ : waypoints_[wp_idx_];
+  std::array<float,3> target_sp = holding_last_sp_? hold_position_ : setpoints_[sp_idx_];
   
-  Eigen::Vector3f target(target_wp[0], target_wp[1], target_wp[2]);
-  msg.position = {target_wp[0], target_wp[1], target_wp[2]};
+  Eigen::Vector3f target(target_sp[0], target_sp[1], target_sp[2]);
+  msg.position = {target_sp[0], target_sp[1], target_sp[2]};
   
-  Eigen::Vector3f to_wp = target - current;
-  float dist_to_wp = to_wp.norm();
+  Eigen::Vector3f to_sp = target - current;
+  float dist_to_sp = to_sp.norm();
   
-  //normalize to_wp
-  if (dist_to_wp > 1e-3f)
-    to_wp /= dist_to_wp;
+  //normalize to_sp
+  if (dist_to_sp > 1e-3f)
+    to_sp /= dist_to_sp;
   switch(flight_mode_){
     case STANDBY:
       break;
       
     case MULTIROTOR:
-      if(holding_last_wp_) {
-        if(dist_to_wp < 3.0f) {
+      if(holding_last_sp_) {
+        if(dist_to_sp < 3.0f) {
           hold_counter_++;
           
           if(hold_counter_ > HOLD_THRESHOLD) {
@@ -210,36 +249,51 @@ void Flight::publishTrajectorySetpoint() {
           hold_counter_ = 0;
       }
       else { //not holding last waypoint
-        if(dist_to_wp < 3.0f) {
+        if(dist_to_sp < 3.0f) {
           hold_counter_++;
           
           if(hold_counter_ > HOLD_THRESHOLD) {
             hold_counter_ = 0;
-            wp_idx_++;
             
-            if(wp_idx_ == 1) transition(FIXED_WING);
+            sp_idx_ ++;
             
-            RCLCPP_INFO(get_logger(), "[MULTIROTOR] Heading to waypoint %zu", wp_idx_);
+            if(sp_idx_ == 1) transition(FIXED_WING);
           }
         } else
           hold_counter_ = 0;
       }
       break;
     
-    case FIXED_WING:
-      msg.velocity = {k*to_wp.x(), k*to_wp.y(), 0.0f};
-      if (dist_to_wp < 10.0f) {
-        wp_idx_++;
-        if(wp_idx_ >= waypoints_.size()) {
-          holding_last_wp_ = true;
+    case FIXED_WING: {
+      index_step = indexStep();
+      
+      Eigen::Vector3f next_target(
+        setpoints_[sp_idx_ + index_step][0], 
+        setpoints_[sp_idx_ + index_step][1],
+        setpoints_[sp_idx_ + index_step][2]
+      );
+      Eigen::Vector3f trajectory_segment = (next_target - target).normalized();
+      msg.velocity = {
+        k*trajectory_segment.x() + cross_k*to_sp.x(),
+        k*trajectory_segment.y() + cross_k*to_sp.y(), 0.0f
+      };
+      
+      if (passedSetpoint(
+        setpoints_[sp_idx_][0], setpoints_[sp_idx_][1], 
+        setpoints_[sp_idx_+index_step][0], setpoints_[sp_idx_+index_step][1], 
+        curr_odom_.position[0], curr_odom_.position[1]
+      )) {
+        sp_idx_ += index_step;
+        index_step = 1;
+        
+        if(sp_idx_ >= setpoints_.size()) {
+          holding_last_sp_ = true;
           transition(MULTIROTOR);
-        }
-        else {
-          RCLCPP_INFO(this->get_logger(), "[FIXED_WING] Heading to waypoint %ld", wp_idx_);
         }
       }
       break;
-      
+    }
+    
     case FINISHED:
       msg.position = {hold_position_[0], hold_position_[1], hold_position_[2]};
       break;
@@ -247,6 +301,7 @@ void Flight::publishTrajectorySetpoint() {
   msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
   trajectory_setpoint_publisher->publish(msg);
 }
+
 
 void Flight::set_origin(){
   if(origin_counter < origin_count_threshold){
@@ -262,13 +317,44 @@ void Flight::set_origin(){
 
     set_origin_done = true;
     RCLCPP_INFO(this->get_logger(), "Origin set to (%f, %f, %f)", origin[0], origin[1], origin[2]);
-    for(int i = 0; i < waypoints_.size(); i++){
-      waypoints_[i][0] += origin[0];
-      waypoints_[i][1] += origin[1];
-      waypoints_[i][2] += origin[2];
+    for(int i = 0; i < setpoints_.size(); i++){
+      setpoints_[i][0] += origin[0];
+      setpoints_[i][1] += origin[1];
+      setpoints_[i][2] += origin[2];
     }
   }  
 }
+
+
+bool Flight::passedSetpoint(float x1, float y1, float x2, float y2, float x_curr, float y_curr) {
+  float trajectory_vector[2] = {x2 - x1, y2 - y1};
+  float current_pos_vector[2] = {x_curr - x1, y_curr - y1};
+  
+  float inner_product = trajectory_vector[0]*current_pos_vector[0] + trajectory_vector[1]*current_pos_vector[1];
+  
+  return inner_product > 0;
+}
+
+//helper for index_step
+bool Flight::same_coordinates_(float x1, float y1, float x2, float y2, float eps) {
+  return std::abs(x2 - x1) < eps && std::abs(y2 - y1) < eps;
+}
+
+int Flight::indexStep() {
+  int step_ = 1;
+  constexpr float eps_ = 1.0;
+  
+  while(sp_idx_ + step_ < setpoints_.size() &&
+        same_coordinates_(
+          setpoints_[sp_idx_][0], setpoints_[sp_idx_][1],
+          setpoints_[sp_idx_+step_][0], setpoints_[sp_idx_+step_][1],
+          eps_    
+        ) 
+  ) {step_ ++;}
+
+  return step_;
+}
+
 
 void Flight::publishVehicleCommand(uint16_t command, float param1, float param2) {
   VehicleCommand msg {};

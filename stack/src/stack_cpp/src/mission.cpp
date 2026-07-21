@@ -55,7 +55,7 @@ class Mission : public rclcpp::Node {
 	  has_odom = true;
         });
         
-      //TODO: the topic might not exist for different firmware versions
+      //TODO: the topic might not exist depending on the firmware version
       vehicle_status_subscriber = this->create_subscription<VehicleStatus>("/fmu/out/vehicle_status_v1", rclcpp::SensorDataQoS(),
         [this](const VehicleStatus::SharedPtr msg) {
           armed = (msg->arming_state == VehicleStatus::ARMING_STATE_ARMED);
@@ -107,11 +107,21 @@ class Mission : public rclcpp::Node {
         counter_ ++;
         publishMissionSummary();
         
-        if(self_state == NodeState::IDLE
-           || mission_mode == MissionMode::FINISHED)
+        if(self_state == NodeState::IDLE) return;
+        
+        if(mission_mode == MissionMode::FINISHED) {
+          if(!armed){
+            publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1.0f, 3.0f);
+            idle();
+            return;
+          }
+          if(landed){
+            RCLCPP_INFO(this->get_logger(), "Disarming vehicle.");
+            disarm();
+          }
           return;
+        }
           
-        //mission mode abort handeled in switch()
         if(self_state == NodeState::ABORT) {
            abort();
            return;
@@ -145,16 +155,7 @@ class Mission : public rclcpp::Node {
               publishMissionCommand(NodeName::VISION, NodeState::BUSY);
             }
             
-            all_go = (manager.get(NodeName::MISSION) == NodeState::BUSY) &&
-              (manager.get(NodeName::FLIGHT) == NodeState::IDLE) &&
-              (manager.get(NodeName::TARGET) == NodeState::IDLE) &&
-              (manager.get(NodeName::GRIPPER) == NodeState::IDLE) &&
-              (manager.get(NodeName::VISION) == NodeState::BUSY) &&
-              (manager.get(NodeName::MARKER) == NodeState::IDLE) &&
-              (manager.get(NodeName::YOLO) == NodeState::IDLE) &&
-              (manager.get(NodeName::LOGGER) == NodeState::BUSY);
-            
-            if(all_go) {
+            if(allGo()) {
               RCLCPP_WARN(this->get_logger(), "All green. Proceeding mission.");
               RCLCPP_INFO(this->get_logger(), "Configure gimbal control to offboard.");
               //TODO: find appropriate sysid/compid for actual aircraft
@@ -268,7 +269,6 @@ class Mission : public rclcpp::Node {
               
               mission_mode = MissionMode::LANDING;
               RCLCPP_INFO(this->get_logger(), "MissionMode: Landing");
-              //TODO: set gimbal pitch according to desired view
             }
             break;
           
@@ -286,26 +286,14 @@ class Mission : public rclcpp::Node {
               publishMissionCommand(NodeName::TARGET, NodeState::IDLE);
               mission_mode = MissionMode::FINISHED;
               RCLCPP_INFO(this->get_logger(), "MissionMode: Finished");
-              
-            }
-            break;
-
-          case MissionMode::FINISHED:
-            if(!armed){
-              publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1.0f, 3.0f);
-              idle();
-              return;
-            }
-            if(landed){
-              RCLCPP_INFO(this->get_logger(), "Disarming vehicle.");
-              disarm();
             }
             break;
 
           case MissionMode::ABORT:
-          default:
             RCLCPP_ERROR(this->get_logger(), "ABORTING MISSION");
             abort();
+          default:
+          case MissionMode::FINISHED:
             break;
         }
     };
@@ -352,7 +340,9 @@ class Mission : public rclcpp::Node {
     void publishOffboardControlMode();
     void publishVehicleCommand(uint16_t command, float param1 = 0.0, float param2 = 0.0, float param3 = 0.0, float param4 = 0.0, float param5 = 0.0);
     
-    int gimbal_device_flag = 0b0000101100; //roll, pitch lock to earth, yaw lock to vehicle
+    //roll, pitch lock to earth, yaw lock to vehicle
+    //TODO: doesn't work in gazebo(harmonic)?
+    int gimbal_device_flag = 0b0000101100;
     
     bool armed = false;
     bool landed = false;
@@ -366,6 +356,8 @@ class Mission : public rclcpp::Node {
     void idle();
     
     bool needVelocityControl();
+    bool allGo();
+    bool nodeTest(NodeName node, NodeState state = NodeState::IDLE);
     
     float nan = std::numeric_limits<float>::quiet_NaN();
 };
@@ -375,7 +367,6 @@ bool Mission::skipStatusEval(NodeName node) {
   return (
     (node == NodeName::MISSION)
     || (node == NodeName::VISION)
-    || (node == NodeName::LOGGER)
   );
 }
 
@@ -389,12 +380,15 @@ void Mission::idle() {
   
   for(int i = 0; i < num_of_nodes; i++) {
     NodeName node = static_cast<NodeName>(i);
-     if(manager.get(node) != NodeState::IDLE){
-      RCLCPP_WARN(this->get_logger(), "Some nodes might still be active.");
-      RCLCPP_WARN(this->get_logger(), "Trying to kill all remaining nodes...");
-      return;
+    if(!skipStatusEval(node)) {
+      if(manager.get(node) != NodeState::IDLE){
+        RCLCPP_WARN(this->get_logger(), "Some nodes might still be active.");
+        RCLCPP_WARN(this->get_logger(), "Trying to kill all remaining nodes...");
+        return;
+      }
     }
   }
+  self_state = NodeState::IDLE;
   manager.set(NodeName::MISSION, NodeState::IDLE);
   RCLCPP_WARN(this->get_logger(), "All nodes set to IDLE.");
 }
@@ -451,6 +445,45 @@ bool Mission::needVelocityControl() {
           || mission_mode == MissionMode::RESCUE
           || mission_mode == MissionMode::DROP);
 }
+
+//allGo() helper function
+bool Mission::nodeTest(NodeName node, NodeState state) {
+  bool test_result = manager.get(node) == state;
+  
+  if(test_result) RCLCPP_WARN(this->get_logger(), "Test passed.");
+  else RCLCPP_WARN(this->get_logger(), "Test failed.");
+  
+  return test_result;
+}
+
+bool Mission::allGo() {  
+  RCLCPP_WARN(this->get_logger(), "Starting pre-mission test for MISSION");
+  if(!nodeTest(NodeName::MISSION, NodeState::BUSY)) return false;
+  
+  RCLCPP_WARN(this->get_logger(), "Starting pre-mission test for FLIGHT");
+  if(!nodeTest(NodeName::FLIGHT, NodeState::IDLE)) return false;
+  
+  RCLCPP_WARN(this->get_logger(), "Starting pre-mission test for TARGET");
+  if(!nodeTest(NodeName::TARGET, NodeState::IDLE)) return false;
+  
+  RCLCPP_WARN(this->get_logger(), "Starting pre-mission test for GRIPPER");
+  if(!nodeTest(NodeName::GRIPPER, NodeState::IDLE)) return false;
+  
+  RCLCPP_WARN(this->get_logger(), "Starting pre-mission test for VISION");
+  if(!nodeTest(NodeName::VISION, NodeState::BUSY)) return false;
+  
+  RCLCPP_WARN(this->get_logger(), "Starting pre-mission test for MARKER");
+  if(!nodeTest(NodeName::MARKER, NodeState::IDLE)) return false;
+
+  RCLCPP_WARN(this->get_logger(), "Starting pre-mission test for YOLO");
+  if(!nodeTest(NodeName::YOLO, NodeState::IDLE)) return false;
+
+  RCLCPP_WARN(this->get_logger(), "Starting pre-mission test for LOGGER");
+  if(!nodeTest(NodeName::LOGGER, NodeState::BUSY)) return false;
+    
+  return true;
+}
+
 
 void Mission::publishOffboardControlMode() {
   OffboardControlMode msg {};

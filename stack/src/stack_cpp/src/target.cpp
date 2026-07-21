@@ -107,6 +107,8 @@ class Target : public rclcpp::Node {
 
     bool landed_ = false;
     bool nav_land_sent_ = false;
+    
+    bool need_init = true;
 
     int preflight_setpoint_count_ = 0;
     int offboard_setpoint_counter_ = 0;
@@ -330,8 +332,21 @@ Eigen::Vector3f Target::body_frd_to_ned(const Eigen::Vector3f &body_frd) const {
 
 void Target::land() {
   TrajectorySetpoint msg;
-
+  
   const float alt_m = -acc_alt_;
+  
+  if(need_init){
+    if(curr_odom_.position[2] > -10.0) {
+      need_init = false;
+      return;
+    }
+    
+    msg.velocity = {0.0, 0.0, descent_high_mps_};
+    msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+    trajectory_setpoint_publisher->publish(msg);
+    return;
+  }
+
 
   const bool valid_xy =
     std::isfinite(desired_x_) &&
