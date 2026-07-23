@@ -18,7 +18,6 @@ find_package(Eigen3 REQUIRED)
 add_executable(mission src/mission.cpp src/mission_manager.cpp)
 add_executable(flight src/flight.cpp src/mission_manager.cpp)
 add_executable(target src/target.cpp src/mission_manager.cpp)
-add_executable(gripper src/gripper.cpp src/mission_manager.cpp)
 add_executable(logger src/logger.cpp src/mission_manager.cpp)
 
 include_directories(include ${catkin_INCLUDE_DIRS})
@@ -32,16 +31,12 @@ target_include_directories(flight PUBLIC ${EIGEN3_INCLUDE_DIRS})
 ament_target_dependencies(target rclcpp std_msgs geometry_msgs px4_msgs)
 target_include_directories(target PUBLIC ${EIGEN3_INCLUDE_DIRS})
 
-#TODO: add appropriate dependencies
-ament_target_dependencies(gripper rclcpp std_msgs)
-
 ament_target_dependencies(logger rclcpp std_msgs px4_msgs)
 
 install(TARGETS
   mission
   flight
   target
-  gripper
   logger
   DESTINATION lib/${PROJECT_NAME})
 

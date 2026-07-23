@@ -3,76 +3,83 @@
 """
 rescue_sequence_node.py
 
-자율 비행 조난자 구조용 고정익 비행기 - 그리퍼/승강 시퀀스 제어 노드
+자율 비행 조난자 구조용 고정익 비행기 - 그리퍼(2서보) 파지/승강 시퀀스 제어 노드
 
-[하드웨어]
+[하드웨어 / 제어 구조]
 - 컴패니언 컴퓨터: Jetson Orin Nano (Ubuntu 22.04, ROS 2 Humble, Python 3)
-- 그리퍼 구동: MG996R 서보모터 1개 (PCA9685 채널 0번, I2C 연결)
-- 비행 컨트롤러: Pixhawk (연직 레일 승강 시스템 연동은 스텁 처리, 추후 실장)
+- 비행 컨트롤러: Pixhawk (PX4) - uXRCE-DDS 브리지로 ROS 2 와 직접 통신
+- 그리퍼 구동: 서보 2개(양쪽 조), 서로 반대 방향으로 움직임
+
+  ★ 오린은 저수준 서보 제어(PWM/PCA9685)를 하지 않습니다.
+    오린은 "이 각도로 가라" 라는 액추에이터 값(-1~1)만 PX4 에 보내고,
+    실제 서보 출력/PWM 은 PX4 의 control allocation(출력 함수 매핑)이 담당합니다.
+
+  ★ 2개 서보가 반대로 움직이는 것은 PX4 출력 설정에서 처리합니다.
+    한쪽 채널(서보 B)의 출력 min/max 를 뒤집어(reverse) 두었기 때문에,
+    이 노드는 두 채널에 **같은 값**을 보내면 물리적으로 반대로 움직입니다.
+
+[왜 DO_GRIPPER 가 아니라 DO_SET_ACTUATOR 인가]
+- PX4 내장 Gripper 기능은 완전개방↔완전폐쇄 2상태(binary)뿐이라
+  "조금 짚기(중간 각도)" 같은 2단 각도를 낼 수 없습니다.
+- DO_SET_ACTUATOR 는 -1~1 연속값이라 각 단계의 각도를 자유롭게 지정할 수 있습니다.
+- DO_SET_ACTUATOR 는 "Offboard Actuator Set N" 으로 지정한 **보조 출력핀만** 움직이며,
+  모터/조종면 출력은 계속 비행 컨트롤러가 제어합니다. Offboard 모드 진입도, 믹서
+  대체도 아니므로 비행 안전에 영향이 없습니다. (⚠️ direct_actuator 방식과 혼동 금지)
+
+[통신 방식]
+- 명령 송신: /fmu/in/vehicle_command  (px4_msgs/VehicleCommand)
+             command = VEHICLE_CMD_DO_SET_ACTUATOR(187)
+             param1  = 액추에이터 1 값 (-1~1)  -> QGC "Offboard Actuator Set 1" (서보 A)
+             param2  = 액추에이터 2 값 (-1~1)  -> QGC "Offboard Actuator Set 2" (서보 B, PX4 에서 리버스)
+             param7  = index (0 = 액추에이터 세트 1~6 그룹)
+- 결과 수신: /fmu/out/vehicle_command_ack (px4_msgs/VehicleCommandAck)
+
+[QGC 사전 설정 (Actuators 출력)]
+  - 서보 A 를 연결한 출력핀 함수 = "Offboard Actuator Set 1"
+  - 서보 B 를 연결한 출력핀 함수 = "Offboard Actuator Set 2"  (+ 출력 방향 리버스)
+  - 두 핀 모두 모터/조종면과 겹치지 않는 여분 AUX 출력이어야 함.
 
 [상태 머신]
-IDLE -> (미션 트리거) -> GRASPING -> WAITING_USER -> (Y) -> ASCENDING
-                                                  -> (N) -> RELEASING -> IDLE
+IDLE -> (자동 시작 / 미션 트리거) -> GRASP_PARTIAL(조금 짚기) -> WAITING_USER
+        -> (Y) -> ASCENDING(완전 파지/승강) -> HOLDING(유지)
+                                              -> (Y/N) -> RELEASING(개방) -> IDLE
+        -> (N) -> RELEASING(개방) -> IDLE
+
+[단독 실행 모드]
+- 노드를 실행하면 auto_start_delay_sec(기본 2초) 뒤에 스스로 1단계를 시작합니다.
+- WAITING_USER 에서는 터미널에 y 또는 n 을 치고 Enter 를 누르면 됩니다.
+- HOLDING(유지) 에서 다시 y 를 치면 그리퍼를 개방하고 IDLE 로 돌아갑니다.
+  (지상 테스트에서 파지 -> 개방을 반복 확인하거나, 하차 지점에서 내려놓을 때 사용)
+- 외부 토픽(mission_trigger / user_input) 구독은 주석 처리해 두었습니다.
+  미션 플래너와 연동할 때 주석을 되살리고 아래 파라미터를 false 로 주세요:
+      ros2 run imagery_processing rescue_sequence_node --ros-args \
+          -p auto_start:=false -p keyboard_input:=false
 """
 
-import time
+import sys
+import threading
 from enum import Enum, auto
 
 import rclpy
 from rclpy.node import Node
 from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
 from std_msgs.msg import String, Bool
 
-# ----------------------------------------------------------------------------
-# PCA9685 / 서보킷 제어 라이브러리
-#   - Jetson 실기 환경에서는 adafruit-circuitpython-servokit 이 필요합니다.
-#   - 코드 리뷰/시뮬레이션 환경(라이브러리 미설치) 에서도 노드 로직을 확인할 수
-#     있도록, 라이브러리 임포트 실패 시 콘솔 출력만 하는 더미(Mock) 클래스로
-#     대체하는 안전장치를 넣었습니다. 실기에서는 반드시 정상 임포트되어야 합니다.
-# ----------------------------------------------------------------------------
-try:
-    from adafruit_servokit import ServoKit
-    SERVOKIT_AVAILABLE = True
-except ImportError:
-    SERVOKIT_AVAILABLE = False
-
-
-class MockServoKit:
-    """
-    adafruit_servokit 라이브러리가 없는 환경(예: 개발 PC)에서
-    노드 로직 테스트를 위해 사용하는 더미 클래스입니다.
-    실제 젯슨 보드에서는 사용되지 않고, 위의 SERVOKIT_AVAILABLE 분기로
-    실제 ServoKit 이 사용됩니다.
-    """
-    class _MockChannel:
-        def __init__(self, ch_id):
-            self.ch_id = ch_id
-            self._angle = 0.0
-
-        @property
-        def angle(self):
-            return self._angle
-
-        @angle.setter
-        def angle(self, value):
-            self._angle = value
-            # 실제 하드웨어가 없을 때 콘솔로만 확인
-            # print(f"[MOCK PCA9685] channel {self.ch_id} angle -> {value:.1f}")
-
-    def __init__(self, channels=16):
-        self.servo = [self._MockChannel(i) for i in range(channels)]
+from px4_msgs.msg import VehicleCommand, VehicleCommandAck
 
 
 # =============================================================================
 # 상태(State) 정의
 # =============================================================================
 class RescueState(Enum):
-    IDLE = auto()          # 대기 상태: 그리퍼 완전 개방(0도)
-    GRASPING = auto()      # 파지 진행: 0 -> 60도 저속 구동
-    WAITING_USER = auto()  # 사용자(HITL) 승인 대기
-    ASCENDING = auto()     # 승인(Y) 이후 연직 레일 승강 (Pixhawk 연동 스텁)
-    RELEASING = auto()     # 거부(N) 이후 그리퍼 해제: 60 -> 0도 저속 구동
+    IDLE = auto()           # 대기 상태: 그리퍼 개방
+    GRASP_PARTIAL = auto()  # 1단계: 조금 짚기 (중간 각도) 명령 후 완료 대기
+    WAITING_USER = auto()   # 사용자(HITL) 승인 대기
+    ASCENDING = auto()      # 2단계: 완전 파지/승강 (Y 승인 이후) 명령 후 완료 대기
+    HOLDING = auto()        # 승강 완료 후 대상 유지 (여기서 Y/N 을 치면 개방)
+    RELEASING = auto()      # 개방 명령 후 완료 대기 (거부(N) 또는 HOLDING 에서 개방)
 
 
 class RescueSequenceNode(Node):
@@ -80,106 +87,291 @@ class RescueSequenceNode(Node):
     조난자 구조 시퀀스를 관리하는 ROS 2 노드.
 
     핵심 설계 포인트:
-    - time.sleep() 을 전혀 사용하지 않고, rclpy 의 create_timer() 를 이용해
-      짧은 주기(예: 20ms)마다 콜백을 실행시켜 서보 각도를 조금씩 증가/감소시킵니다.
-      이렇게 하면 서보가 움직이는 동안에도 ROS 2 콜백(토픽 수신, 다른 타이머 등)이
-      블로킹되지 않고 계속 처리됩니다 (비동기/논블로킹 동작).
-    - 상태 머신(RescueState)을 통해 현재 시퀀스 단계를 명확히 관리합니다.
+    - time.sleep() 을 사용하지 않습니다. 명령 ACK 대기/서보 이동 대기는 모두
+      rclpy 의 타이머로 처리하여, 대기 중에도 다른 콜백(토픽 수신 등)이
+      블로킹되지 않습니다.
+    - 각 단계의 각도는 -1~1 액추에이터 값(파라미터)으로 지정합니다. 두 서보가
+      반대로 움직이는 것은 PX4 출력 리버스로 처리하므로, 두 채널에 같은 값을
+      보냅니다.
     """
-
-    # ------------------------------------------------------------------
-    # 사용자 설정 파라미터 (필요 시 ROS 2 파라미터로 승격 가능)
-    # ------------------------------------------------------------------
-    PCA9685_CHANNEL = 0            # PCA9685 상의 서보 연결 채널 번호
-    ANGLE_OPEN = 0.0                # 그리퍼 완전 개방 각도 (이론값, 추후 실측 후 보정 예정)
-    ANGLE_GRASP = 60.0               # 그리퍼 파지 완료 각도 (이론값, 추후 실측 후 보정 예정)
-    STEP_DEGREE = 1.0               # 타이머 1회당 증가/감소시키는 각도(도) - 값이 작을수록 더 부드러움
-    STEP_PERIOD_SEC = 0.02           # 타이머 주기 (초) - 20ms 마다 STEP_DEGREE 만큼 이동 => 저속 구동
-
-    # Pixhawk 관련 - 포트/파라미터가 아직 확정되지 않아 변수로만 선언해 둡니다.
-    # 추후 실제 연동 시 이 값들을 실측 값으로 교체하거나 launch 파라미터로 분리하세요.
-    PIXHAWK_SERIAL_PORT = None       # 예: "/dev/ttyTHS1" 등, 추후 확정 예정 (미정 -> None)
-    PIXHAWK_BAUDRATE = None          # 예: 921600 등, 추후 확정 예정 (미정 -> None)
 
     def __init__(self):
         super().__init__('rescue_sequence_node')
 
-        # 콜백 그룹: 여러 콜백(타이머 + 구독자)이 동시에 존재해도
-        # 서로를 블로킹하지 않도록 재진입 가능한 콜백 그룹을 사용합니다.
+        # 콜백 그룹: 타이머와 구독자가 서로를 블로킹하지 않도록 재진입 허용
         self._cb_group = ReentrantCallbackGroup()
 
         # -----------------------------------------------------------
-        # 1) PCA9685 / 서보 초기화
+        # 1) ROS 2 파라미터 (launch 파일에서 오버라이드 가능)
         # -----------------------------------------------------------
-        if SERVOKIT_AVAILABLE:
-            # 실제 하드웨어 초기화 (I2C 버스를 통해 PCA9685 와 통신)
-            self.kit = ServoKit(channels=16)
-            self.get_logger().info("ServoKit(PCA9685) 하드웨어 초기화 완료.")
-        else:
-            # 라이브러리 미설치 환경 - 더미로 대체 (실기에서는 발생하면 안 됨)
-            self.kit = MockServoKit(channels=16)
-            self.get_logger().warn(
-                "adafruit_servokit 라이브러리를 찾을 수 없어 Mock 모드로 동작합니다. "
-                "실제 젯슨 보드에서는 반드시 라이브러리를 설치하세요."
-            )
+        # DO_SET_ACTUATOR 의 param7(액추에이터 세트 그룹 index). 0 이면
+        # param1~param6 이 "Offboard Actuator Set 1~6" 에 매핑됩니다.
+        self.declare_parameter('actuator_set_index', 0)
+        # 각 단계의 서보 목표값 (-1.0 ~ +1.0). 현장에서 QGC 없이 각도 튜닝 가능.
+        self.declare_parameter('grip_partial', 0.4)   # 1단계: 조금 짚기
+        self.declare_parameter('grip_full', 1.0)      # 2단계: 완전 파지/승강
+        self.declare_parameter('grip_open', -1.0)     # 개방
+        # PX4 로부터 명령 ACK 를 기다리는 최대 시간(초).
+        self.declare_parameter('ack_timeout_sec', 2.0)
+        # ACK 수신 후, 서보가 목표 각도까지 실제로 이동하는 데 걸리는 시간(초).
+        self.declare_parameter('move_settle_sec', 2.0)
+        # 노드를 실행하면 외부 트리거 없이 스스로 1단계를 시작할지 여부.
+        self.declare_parameter('auto_start', True)
+        # 자동 시작까지의 지연(초). PX4 연결과 DDS 디스커버리가 자리잡을 시간.
+        self.declare_parameter('auto_start_delay_sec', 2.0)
+        # 터미널에서 Y/N 을 직접 입력받을지 여부.
+        self.declare_parameter('keyboard_input', True)
 
-        # 노드 시작 시 그리퍼를 확실히 '개방' 상태로 초기화
-        self.current_angle = self.ANGLE_OPEN
-        self._set_servo_angle(self.current_angle)
+        self.actuator_set_index = self.get_parameter('actuator_set_index').value
+        self.grip_partial = self.get_parameter('grip_partial').value
+        self.grip_full = self.get_parameter('grip_full').value
+        self.grip_open = self.get_parameter('grip_open').value
+        self.ack_timeout_sec = self.get_parameter('ack_timeout_sec').value
+        self.move_settle_sec = self.get_parameter('move_settle_sec').value
+        self.auto_start = self.get_parameter('auto_start').value
+        self.auto_start_delay_sec = self.get_parameter('auto_start_delay_sec').value
+        self.keyboard_input = self.get_parameter('keyboard_input').value
 
         # -----------------------------------------------------------
-        # 2) 상태 변수 초기화
+        # 2) PX4 uXRCE-DDS 통신용 QoS
+        #    PX4 가 발행/구독하는 /fmu/* 토픽은 BEST_EFFORT + TRANSIENT_LOCAL 을
+        #    사용합니다. 기본 QoS 로 두면 메시지가 오가지 않으니 반드시 맞춰야 합니다.
+        # -----------------------------------------------------------
+        px4_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
+
+        # -----------------------------------------------------------
+        # 3) 상태 변수 초기화
         # -----------------------------------------------------------
         self.state = RescueState.IDLE
-        self.get_logger().info(f"초기 상태: {self.state.name} (그리퍼 {self.ANGLE_OPEN}도 개방)")
 
-        # 저속 구동 타이머 핸들 (필요 시에만 생성/해제하여 리소스 낭비 방지)
-        self._motion_timer = None
-        self._motion_target_angle = None   # 현재 저속 구동의 목표 각도
-        self._motion_direction = 0          # +1: 증가(GRASPING), -1: 감소(RELEASING)
+        # 현재 ACK 를 기다리고 있는 명령 (None 이면 대기 중 아님)
+        self._pending_command = None     # 방금 보낸 VehicleCommand.command 값
+        self._ack_timer = None           # ACK 타임아웃 감시 타이머
+        self._settle_timer = None        # 서보 이동 완료 대기 타이머
+        self._on_move_done = None        # 이동 완료 시 실행할 콜백
 
         # -----------------------------------------------------------
-        # 3) 구독자(Subscriber) / 서비스 등 인터페이스 설정
+        # 4) PX4 인터페이스
         # -----------------------------------------------------------
-
-        # (a) 외부 미션 트리거: 비행기가 조난자 위치에 도달했음을 알리는 토픽
-        #     예시로 std_msgs/Bool 타입을 사용 (True 수신 시 GRASPING 시작)
-        #     실제 미션 플래너 노드에서 이 토픽으로 True 를 1회 publish 하도록 구성하세요.
-        self.mission_trigger_sub = self.create_subscription(
-            Bool,
-            '/rescue_system/mission_trigger',
-            self.mission_trigger_callback,
-            10,
+        self.vehicle_command_pub = self.create_publisher(
+            VehicleCommand, '/fmu/in/vehicle_command', px4_qos
+        )
+        self.command_ack_sub = self.create_subscription(
+            VehicleCommandAck,
+            '/fmu/out/vehicle_command_ack',
+            self.command_ack_callback,
+            px4_qos,
             callback_group=self._cb_group,
         )
 
-        # (b) 지상 통제소(GCS) 사용자 입력 토픽: 'Y' 또는 'N'
-        self.user_input_sub = self.create_subscription(
-            String,
-            '/rescue_system/user_input',
-            self.user_input_callback,
-            10,
-            callback_group=self._cb_group,
-        )
+        # -----------------------------------------------------------
+        # 5) 미션/GCS 인터페이스
+        # -----------------------------------------------------------
+
+        # ┌─────────────────────────────────────────────────────────────┐
+        # │ [단독 실행 모드로 전환하면서 주석 처리]                      │
+        # │  아래 두 구독자는 외부 노드/터미널에서 토픽을 쏴줘야만       │
+        # │  시퀀스가 진행되는 방식입니다. 지금은 노드를 실행하면        │
+        # │  자동으로 시작하고 키보드로 Y/N 을 받으므로 꺼둡니다.        │
+        # │  미션 플래너와 연동할 때 아래 주석을 되살리고,               │
+        # │  파라미터 auto_start / keyboard_input 을 false 로 주면 됩니다.│
+        # └─────────────────────────────────────────────────────────────┘
+
+        # # (a) 외부 미션 트리거: 조난자 위치 도달 신호 (True 수신 시 GRASP_PARTIAL 시작)
+        # self.mission_trigger_sub = self.create_subscription(
+        #     Bool,
+        #     '/rescue_system/mission_trigger',
+        #     self.mission_trigger_callback,
+        #     10,
+        #     callback_group=self._cb_group,
+        # )
+        #
+        # # (b) 지상 통제소(GCS) 사용자 입력 토픽: 'Y' 또는 'N'
+        # self.user_input_sub = self.create_subscription(
+        #     String,
+        #     '/rescue_system/user_input',
+        #     self.user_input_callback,
+        #     10,
+        #     callback_group=self._cb_group,
+        # )
 
         # (c) 현재 상태를 외부(GCS/RViz)에 알리기 위한 상태 퍼블리셔
-        #     RViz 패널이나 GCS 소프트웨어에서 이 토픽을 구독해 현재 상태를 표시할 수 있습니다.
         self.state_pub = self.create_publisher(String, '/rescue_system/state', 10)
         self._publish_state()
 
-        self.get_logger().info("구조 시퀀스 제어 노드가 준비되었습니다. 미션 트리거 대기 중...")
+        self.get_logger().info(
+            f"구조 시퀀스 제어 노드 준비 완료 "
+            f"(세트 index={self.actuator_set_index}, "
+            f"조금짚기={self.grip_partial}, 완전={self.grip_full}, 개방={self.grip_open})."
+        )
+
+        # -----------------------------------------------------------
+        # 6) 단독 실행 모드: 자동 시작 + 키보드 입력
+        # -----------------------------------------------------------
+
+        # 키보드 입력 스레드를 먼저 띄워야, 자동 시작이 빨라도 Y 를 놓치지 않습니다.
+        self._stdin_thread = None
+        if self.keyboard_input:
+            self._start_keyboard_thread()
+
+        if self.auto_start:
+            self.get_logger().info(
+                f"{self.auto_start_delay_sec:.1f}초 후 1단계 '조금 짚기' 를 자동으로 시작합니다."
+            )
+            # 일회성 타이머: PX4 연결/DDS 디스커버리가 자리잡을 시간을 준 뒤 시작
+            self._auto_start_timer = self.create_timer(
+                self.auto_start_delay_sec,
+                self._on_auto_start,
+                callback_group=self._cb_group,
+            )
+        else:
+            self._auto_start_timer = None
+            self.get_logger().info("자동 시작 꺼짐. 미션 트리거 대기 중...")
 
     # =========================================================================
-    # 서보 각도 저수준 제어 함수
+    # PX4 명령 송신
     # =========================================================================
-    def _set_servo_angle(self, angle: float):
+    def _publish_vehicle_command(self, command: int, param1: float = 0.0,
+                                 param2: float = 0.0, param7: float = 0.0):
         """
-        PCA9685의 지정 채널에 실제 각도 값을 씁니다.
-        각도는 0~180도 범위로 클램핑하여 서보/기구 손상을 방지합니다.
+        PX4 로 VehicleCommand 를 발행합니다.
+        multirotor 패키지의 C++ 노드와 동일한 필드 규약을 사용합니다.
         """
-        angle = max(0.0, min(180.0, angle))
-        self.kit.servo[self.PCA9685_CHANNEL].angle = angle
-        self.current_angle = angle
+        msg = VehicleCommand()
+        msg.command = command
+        msg.param1 = float(param1)
+        msg.param2 = float(param2)
+        msg.param7 = float(param7)
+        msg.target_system = 1
+        msg.target_component = 1
+        msg.source_system = 1
+        msg.source_component = 1
+        msg.from_external = True
+        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+        self.vehicle_command_pub.publish(msg)
+
+    def _set_actuators(self, value: float, on_done, label: str):
+        """
+        PX4 에 그리퍼 서보 목표값을 보내고 ACK 를 기다립니다.
+
+        두 서보 채널(Offboard Actuator Set 1/2)에 같은 값을 보냅니다.
+        서보 B 의 반대 방향은 PX4 출력 리버스가 처리합니다.
+
+        :param value:  액추에이터 목표값 (-1.0 ~ +1.0)
+        :param on_done: 서보 이동이 완료된 것으로 판단됐을 때 호출할 콜백(인자 없음)
+        :param label:  로그용 동작 이름 (예: '조금 짚기')
+        """
+        self._cancel_gripper_timers()
+
+        self._pending_command = VehicleCommand.VEHICLE_CMD_DO_SET_ACTUATOR
+        self._on_move_done = on_done
+
+        self.get_logger().info(
+            f"PX4 로 그리퍼 서보 명령 전송: {label} (값={value:+.2f}, DO_SET_ACTUATOR)."
+        )
+
+        self._publish_vehicle_command(
+            VehicleCommand.VEHICLE_CMD_DO_SET_ACTUATOR,
+            param1=value,                       # 서보 A (Offboard Actuator Set 1)
+            param2=value,                       # 서보 B (Offboard Actuator Set 2, PX4 리버스)
+            param7=float(self.actuator_set_index),
+        )
+
+        # ACK 가 정해진 시간 안에 오지 않으면 실패로 처리
+        self._ack_timer = self.create_timer(
+            self.ack_timeout_sec,
+            self._on_ack_timeout,
+            callback_group=self._cb_group,
+        )
+
+    def command_ack_callback(self, msg: VehicleCommandAck):
+        """
+        PX4 가 보내는 명령 ACK 를 처리합니다.
+        우리가 방금 보낸 명령(DO_SET_ACTUATOR)에 대한 ACK 만 골라서 봅니다.
+        """
+        if self._pending_command is None:
+            return  # 대기 중인 명령 없음
+        if msg.command != self._pending_command:
+            return  # 다른 명령(ARM 등)의 ACK 는 무시
+
+        if msg.result == VehicleCommandAck.VEHICLE_CMD_RESULT_IN_PROGRESS:
+            # 아직 진행 중 - 최종 ACK 를 계속 기다립니다.
+            self.get_logger().info("PX4: 액추에이터 명령 진행 중(IN_PROGRESS)...")
+            return
+
+        # 최종 결과가 왔으므로 ACK 타임아웃 감시는 중단
+        self._cancel_timer('_ack_timer')
+
+        if msg.result == VehicleCommandAck.VEHICLE_CMD_RESULT_ACCEPTED:
+            self.get_logger().info(
+                f"PX4: 액추에이터 명령 수락(ACCEPTED). 서보 이동 완료까지 "
+                f"{self.move_settle_sec:.1f}초 대기합니다."
+            )
+            # PX4 는 명령 수락만 알려줄 뿐 "서보가 실제로 다 움직였다"는 피드백은
+            # 기본 uXRCE-DDS 토픽으로 오지 않습니다. 그래서 서보 이동 시간만큼
+            # 기다린 뒤 완료로 간주합니다.
+            self._settle_timer = self.create_timer(
+                self.move_settle_sec,
+                self._on_settle_complete,
+                callback_group=self._cb_group,
+            )
+        else:
+            # DENIED/UNSUPPORTED 는 대부분 PX4 출력 설정 문제입니다.
+            self.get_logger().error(
+                f"PX4 가 액추에이터 명령을 거부했습니다 (result={msg.result}). "
+                "QGC Actuators 에서 해당 출력핀이 'Offboard Actuator Set 1/2' 로 "
+                "지정돼 있는지 확인하세요."
+            )
+            self._abort_to_idle()
+
+    def _on_ack_timeout(self):
+        """정해진 시간 안에 PX4 ACK 가 오지 않은 경우."""
+        self._cancel_timer('_ack_timer')
+        self.get_logger().error(
+            f"PX4 로부터 명령 ACK 를 {self.ack_timeout_sec:.1f}초 안에 받지 못했습니다. "
+            "uXRCE-DDS Agent 실행 여부와 /fmu/out/vehicle_command_ack 수신을 확인하세요."
+        )
+        self._abort_to_idle()
+
+    def _on_settle_complete(self):
+        """서보 이동 대기 시간이 끝나 동작이 완료된 것으로 간주."""
+        self._cancel_timer('_settle_timer')
+
+        done_cb = self._on_move_done
+        self._pending_command = None
+        self._on_move_done = None
+
+        if done_cb is not None:
+            done_cb()
+
+    # =========================================================================
+    # 타이머 정리 유틸
+    # =========================================================================
+    def _cancel_timer(self, attr_name: str):
+        """지정한 타이머 속성이 살아 있으면 취소/파괴합니다."""
+        timer = getattr(self, attr_name, None)
+        if timer is not None:
+            timer.cancel()
+            self.destroy_timer(timer)
+            setattr(self, attr_name, None)
+
+    def _cancel_gripper_timers(self):
+        self._cancel_timer('_ack_timer')
+        self._cancel_timer('_settle_timer')
+
+    def _abort_to_idle(self):
+        """명령 실패 시 대기 상태를 정리하고 IDLE 로 복귀합니다."""
+        self._cancel_gripper_timers()
+        self._pending_command = None
+        self._on_move_done = None
+        self.state = RescueState.IDLE
+        self._publish_state()
+        self.get_logger().warn("시퀀스를 중단하고 IDLE 상태로 복귀했습니다.")
 
     def _publish_state(self):
         """현재 상태 머신 상태를 토픽으로 퍼블리시 (GCS/RViz 모니터링용)."""
@@ -188,109 +380,55 @@ class RescueSequenceNode(Node):
         self.state_pub.publish(msg)
 
     # =========================================================================
-    # 타이머 기반 "저속 구동" 제어 루프
-    #   - time.sleep() 대신 create_timer() 를 사용하여 ROS 2 스핀(spin)을
-    #     블로킹하지 않고 각도를 조금씩(STEP_DEGREE) 목표까지 이동시킵니다.
-    # =========================================================================
-    def _start_slow_motion(self, target_angle: float, on_complete):
-        """
-        현재 각도에서 target_angle 까지 STEP_DEGREE 씩 STEP_PERIOD_SEC 주기로
-        서서히 이동시키는 타이머를 시작합니다.
-
-        :param target_angle: 도달해야 할 목표 각도
-        :param on_complete: 목표 각도 도달 시 호출할 콜백 함수(인자 없음)
-        """
-        # 이미 진행 중인 모션 타이머가 있다면 안전하게 정리
-        self._stop_slow_motion()
-
-        self._motion_target_angle = target_angle
-        self._motion_direction = 1 if target_angle > self.current_angle else -1
-        self._motion_on_complete = on_complete
-
-        # ROS 2 Timer 생성: STEP_PERIOD_SEC 마다 _motion_timer_callback 실행
-        self._motion_timer = self.create_timer(
-            self.STEP_PERIOD_SEC,
-            self._motion_timer_callback,
-            callback_group=self._cb_group,
-        )
-
-        self.get_logger().info(
-            f"저속 구동 시작: {self.current_angle:.1f}도 -> {target_angle:.1f}도 "
-            f"(스텝 {self.STEP_DEGREE}도 / {self.STEP_PERIOD_SEC*1000:.0f}ms)"
-        )
-
-    def _motion_timer_callback(self):
-        """
-        타이머가 주기적으로 호출하는 콜백.
-        한 번 호출될 때마다 STEP_DEGREE 만큼만 각도를 이동시켜
-        서보가 부드럽게(기어가듯) 움직이도록 합니다.
-        목표 각도에 도달하면 타이머를 해제하고 on_complete 콜백을 실행합니다.
-        """
-        next_angle = self.current_angle + (self._motion_direction * self.STEP_DEGREE)
-
-        # 목표 각도를 초과/미달하지 않도록 오버슈트 방지 처리
-        reached = False
-        if self._motion_direction > 0 and next_angle >= self._motion_target_angle:
-            next_angle = self._motion_target_angle
-            reached = True
-        elif self._motion_direction < 0 and next_angle <= self._motion_target_angle:
-            next_angle = self._motion_target_angle
-            reached = True
-
-        self._set_servo_angle(next_angle)
-
-        if reached:
-            self.get_logger().info(f"목표 각도 {self._motion_target_angle:.1f}도 도달.")
-            self._stop_slow_motion()
-            # 목표 도달 후 실행할 후속 처리(상태 전이 등) 콜백 실행
-            if self._motion_on_complete is not None:
-                self._motion_on_complete()
-
-    def _stop_slow_motion(self):
-        """진행 중인 저속 구동 타이머가 있다면 안전하게 파괴(해제)합니다."""
-        if self._motion_timer is not None:
-            self._motion_timer.cancel()
-            self.destroy_timer(self._motion_timer)
-            self._motion_timer = None
-
-    # =========================================================================
-    # 미션 트리거 콜백: IDLE -> GRASPING 진입
+    # 미션 트리거 콜백: IDLE -> GRASP_PARTIAL (1단계: 조금 짚기)
     # =========================================================================
     def mission_trigger_callback(self, msg: Bool):
         """
         외부 미션 플래너로부터 '조난자 위치 도달' 신호를 수신했을 때 호출됩니다.
-        현재 상태가 IDLE 일 때만 GRASPING 시퀀스를 시작합니다.
-        (이미 시퀀스가 진행 중일 때 중복 트리거가 들어와도 무시하여 안전성 확보)
+        (현재 구독자는 단독 실행 모드라 주석 처리되어 있습니다. 미션 연동 시 복구)
         """
         if not msg.data:
             return  # False 는 무시
 
+        self._start_sequence('미션 트리거 수신')
+
+    def _on_auto_start(self):
+        """자동 시작 타이머(일회성)가 만료됐을 때 호출됩니다."""
+        self._cancel_timer('_auto_start_timer')
+        self._start_sequence('자동 시작')
+
+    def _start_sequence(self, source_label: str):
+        """
+        IDLE -> GRASP_PARTIAL 전이를 수행합니다. 미션 트리거와 자동 시작이
+        공유하는 단일 진입점입니다. IDLE 일 때만 시작하여, 시퀀스 진행 중
+        중복 트리거가 들어와도 무시합니다.
+        """
         if self.state != RescueState.IDLE:
             self.get_logger().warn(
-                f"미션 트리거 수신했지만 현재 상태가 {self.state.name} 이므로 무시합니다."
+                f"{source_label}: 현재 상태가 {self.state.name} 이므로 무시합니다."
             )
             return
 
-        self.get_logger().info("미션 트리거 수신: GRASPING(파지) 시퀀스를 시작합니다.")
-        self.state = RescueState.GRASPING
+        self.get_logger().info(f"{source_label}: 1단계 '조금 짚기' 시퀀스를 시작합니다.")
+        self.state = RescueState.GRASP_PARTIAL
         self._publish_state()
 
-        # 0도 -> ANGLE_GRASP(60도) 까지 저속 구동 시작.
-        # 목표 도달 시 _on_grasp_complete 콜백이 자동 호출되어 WAITING_USER로 전이됩니다.
-        self._start_slow_motion(self.ANGLE_GRASP, self._on_grasp_complete)
+        self._set_actuators(self.grip_partial, self._on_partial_grasp_complete, '조금 짚기')
 
-    def _on_grasp_complete(self):
+    def _on_partial_grasp_complete(self):
         """
-        그리퍼가 60도(파지 완료 각도)에 도달했을 때 호출되는 콜백.
-        모터 구동을 멈춘 상태(타이머는 이미 _stop_slow_motion 에서 해제됨)에서
+        1단계(조금 짚기)가 완료된 것으로 판단됐을 때 호출되는 콜백.
         사용자 승인을 기다리는 WAITING_USER 상태로 전이합니다.
         """
         self.state = RescueState.WAITING_USER
         self._publish_state()
-        self.get_logger().info(
-            "그리퍼 파지 완료. 사용자 승인 대기 중... "
-            "(/rescue_system/user_input 토픽으로 'Y' 또는 'N' 입력 대기)"
-        )
+
+        if self.keyboard_input:
+            prompt = "터미널에 y(승인) 또는 n(개방) 입력 후 Enter"
+        else:
+            prompt = "/rescue_system/user_input 토픽으로 'Y' 또는 'N' 입력 대기"
+
+        self.get_logger().info(f"1단계 '조금 짚기' 완료. 사용자 승인 대기 중... ({prompt})")
 
     # =========================================================================
     # 사용자 입력(HITL) 콜백: WAITING_USER -> ASCENDING / RELEASING
@@ -300,75 +438,138 @@ class RescueSequenceNode(Node):
         GCS(RViz 패널 또는 게임패드 브리지 노드 등)에서 발행하는
         /rescue_system/user_input 토픽을 수신하는 콜백입니다.
 
-        - 'Y' 수신 시: 파지가 정상적으로 이루어졌다고 판단 -> ASCENDING(승강) 시작
-        - 'N' 수신 시: 파지 실패/취소로 판단 -> RELEASING(해제) 후 IDLE 복귀
+        [WAITING_USER 상태]
+        - 'Y' 수신 시: 파지 성공으로 판단 -> ASCENDING(2단계: 완전 파지/승강)
+        - 'N' 수신 시: 파지 실패/취소로 판단 -> RELEASING(개방) 후 IDLE 복귀
 
-        WAITING_USER 상태가 아닐 때 수신된 입력은 안전을 위해 무시합니다.
+        [HOLDING 상태]
+        - 'Y'/'N' 수신 시: 대상을 내려놓음 -> RELEASING(개방) 후 IDLE 복귀
+
+        그 외 상태(명령 전송/서보 이동 중)에서 수신된 입력은 안전을 위해 무시합니다.
         """
+        self._handle_user_input(msg.data, '토픽')
+
+    def _handle_user_input(self, raw_input: str, source_label: str):
+        """
+        Y/N 판정과 상태 전이를 수행합니다. 토픽 콜백과 키보드 입력 스레드가
+        공유하는 단일 진입점입니다.
+        """
+        user_cmd = raw_input.strip().upper()
+
+        # HOLDING(파지 유지) 에서는 어떤 키든 '개방' 으로 처리합니다.
+        # 완전 파지 후 그리퍼를 다시 열 수 있는 유일한 경로입니다.
+        if self.state == RescueState.HOLDING:
+            if user_cmd in ('Y', 'N'):
+                self.get_logger().info(
+                    f"HOLDING 상태에서 사용자 입력({source_label}) '{user_cmd}' 수신: "
+                    "그리퍼를 개방합니다."
+                )
+                self._start_release()
+            else:
+                self.get_logger().warn(
+                    f"알 수 없는 사용자 입력 '{raw_input}' 입니다. "
+                    "HOLDING 상태에서는 'Y' 또는 'N' 을 치면 그리퍼가 개방됩니다."
+                )
+            return
+
         if self.state != RescueState.WAITING_USER:
             self.get_logger().warn(
-                f"사용자 입력 '{msg.data}' 수신했지만 현재 상태가 "
-                f"{self.state.name} 이므로 무시합니다 (WAITING_USER 상태에서만 유효)."
+                f"사용자 입력({source_label}) '{raw_input}' 수신했지만 현재 상태가 "
+                f"{self.state.name} 이므로 무시합니다 (WAITING_USER/HOLDING 에서만 유효)."
             )
             return
 
-        user_cmd = msg.data.strip().upper()
-
         if user_cmd == 'Y':
-            self.get_logger().info("사용자 승인('Y') 수신: ASCENDING(연직 레일 승강) 시퀀스로 전환합니다.")
+            self.get_logger().info("사용자 승인('Y') 수신: 2단계 '완전 파지/승강' 으로 전환합니다.")
             self.state = RescueState.ASCENDING
             self._publish_state()
-            self._start_ascending()
+            self._set_actuators(self.grip_full, self._on_ascend_complete, '완전 파지/승강')
 
         elif user_cmd == 'N':
-            self.get_logger().info("사용자 거부('N') 수신: 그리퍼를 해제하고 RELEASING 시퀀스를 시작합니다.")
-            self.state = RescueState.RELEASING
-            self._publish_state()
-            # 60도 -> 0도(ANGLE_OPEN) 로 저속 구동. 완료 시 _on_release_complete 호출.
-            self._start_slow_motion(self.ANGLE_OPEN, self._on_release_complete)
+            self.get_logger().info("사용자 거부('N') 수신: 그리퍼를 개방하고 RELEASING 시퀀스를 시작합니다.")
+            self._start_release()
 
         else:
             self.get_logger().warn(
-                f"알 수 없는 사용자 입력 '{msg.data}' 을(를) 수신했습니다. "
+                f"알 수 없는 사용자 입력 '{raw_input}' 을(를) 수신했습니다. "
                 f"'Y' 또는 'N' 만 유효합니다."
             )
 
+    def _start_release(self):
+        """
+        RELEASING(개방) 시퀀스를 시작합니다.
+        WAITING_USER 의 'N' 과 HOLDING 의 'Y'/'N' 이 공유하는 단일 진입점입니다.
+        """
+        self.state = RescueState.RELEASING
+        self._publish_state()
+        self._set_actuators(self.grip_open, self._on_release_complete, '개방')
+
+    # =========================================================================
+    # 키보드 입력 (단독 실행 모드)
+    # =========================================================================
+    def _start_keyboard_thread(self):
+        """
+        표준입력에서 y/n 을 읽는 데몬 스레드를 띄웁니다.
+
+        executor 가 MultiThreadedExecutor 라 이 스레드에서 노드 메서드를 호출해도
+        콜백들과 동일한 수준으로 병렬 실행됩니다. 데몬이라 노드 종료 시 같이 죽습니다.
+        """
+        self._stdin_thread = threading.Thread(
+            target=self._keyboard_loop, name='rescue_keyboard', daemon=True
+        )
+        self._stdin_thread.start()
+
+    def _keyboard_loop(self):
+        """표준입력을 한 줄씩 읽어 _handle_user_input 으로 넘깁니다."""
+        # 백그라운드 실행 등으로 stdin 이 없으면 조용히 빠져나갑니다.
+        if not sys.stdin or not sys.stdin.isatty():
+            self.get_logger().warn(
+                "표준입력이 터미널이 아니라 키보드 입력을 사용할 수 없습니다. "
+                "터미널에서 직접 실행하거나, /rescue_system/user_input 토픽을 쓰세요."
+            )
+            return
+
+        while rclpy.ok():
+            try:
+                line = sys.stdin.readline()
+            except (OSError, ValueError):
+                return
+
+            if line == '':      # EOF (Ctrl-D 또는 stdin 종료)
+                return
+
+            line = line.strip()
+            if not line:        # 그냥 Enter 는 무시
+                continue
+
+            self._handle_user_input(line, '키보드')
+
+    def _on_ascend_complete(self):
+        """
+        2단계(완전 파지/승강)가 완료된 것으로 판단됐을 때 호출되는 콜백.
+        대상을 유지하는 HOLDING 상태로 전이합니다.
+        """
+        self.state = RescueState.HOLDING
+        self._publish_state()
+
+        if self.keyboard_input:
+            prompt = "터미널에 y(또는 n) 입력 후 Enter"
+        else:
+            prompt = "/rescue_system/user_input 토픽으로 'Y' 또는 'N' 발행"
+
+        self.get_logger().info(
+            f"2단계 '완전 파지/승강' 완료. 대상을 유지(HOLDING)합니다. "
+            f"내려놓으려면 개방 입력을 주세요. ({prompt})"
+        )
+
     def _on_release_complete(self):
         """
-        그리퍼 해제(0도) 완료 시 호출되는 콜백.
+        그리퍼 개방 완료 시 호출되는 콜백.
         상태를 IDLE 로 되돌려 다음 미션 트리거를 받을 수 있도록 준비합니다.
         """
         self.state = RescueState.IDLE
         self._publish_state()
-        self.get_logger().info("그리퍼 해제 완료. IDLE 상태로 복귀하여 다음 미션 트리거를 대기합니다.")
-
-    # =========================================================================
-    # 픽스호크 연동 스텁 (연직 레일 승강 시스템)
-    #   - 포트 번호 등 통신 파라미터가 아직 확정되지 않아 PIXHAWK_SERIAL_PORT /
-    #     PIXHAWK_BAUDRATE 를 클래스 상단에 변수(현재 None)로만 선언해 두었습니다.
-    #   - 추후 MAVLink(pymavlink) 또는 MAVROS 연동 코드를 이 함수 내부에
-    #     구현하면 됩니다. 지금은 상태 전이와 로그만 수행하는 스텁입니다.
-    # =========================================================================
-    def _start_ascending(self):
-        """
-        연직 레일 승강 시스템 구동 스텁 함수.
-        실제 구현 시 아래와 같은 작업이 필요할 것으로 예상됩니다:
-          1) PIXHAWK_SERIAL_PORT / PIXHAWK_BAUDRATE 확정 후 시리얼 포트 연결
-          2) MAVLink 명령(예: 특정 서보 출력 채널 PWM 제어, 혹은 커스텀 릴레이 제어)으로
-             레일 승강 모터 구동
-          3) 레일이 완전히 상승 완료되었음을 알리는 센서(리밋 스위치 등) 피드백 처리
-        지금 단계에서는 하드웨어가 아직 정해지지 않았으므로 로그만 출력합니다.
-        """
-        self.get_logger().info(
-            "[STUB] Pixhawk 연동 미구현 상태입니다. "
-            f"PIXHAWK_SERIAL_PORT={self.PIXHAWK_SERIAL_PORT}, "
-            f"PIXHAWK_BAUDRATE={self.PIXHAWK_BAUDRATE} "
-            "(추후 포트/보드레이트 확정 후 실제 MAVLink 연동 코드로 대체 예정)"
-        )
-        # TODO: 실제 Pixhawk/MAVLink 연동 코드 구현 위치
-        # 예) self._pixhawk_conn = mavutil.mavlink_connection(self.PIXHAWK_SERIAL_PORT,
-        #                                                     baud=self.PIXHAWK_BAUDRATE)
-        #     self._pixhawk_conn.mav.command_long_send(...)
+        self.get_logger().info("그리퍼 개방 완료. IDLE 상태로 복귀하여 다음 미션 트리거를 대기합니다.")
 
 
 def main(args=None):
@@ -376,7 +577,7 @@ def main(args=None):
 
     node = RescueSequenceNode()
 
-    # MultiThreadedExecutor 를 사용하면 여러 콜백 그룹이 진짜로 병렬 처리되어
+    # MultiThreadedExecutor 를 사용하면 여러 콜백 그룹이 병렬 처리되어
     # 타이머 콜백과 토픽 콜백이 서로를 기다리지 않고 동작할 수 있습니다.
     from rclpy.executors import MultiThreadedExecutor
     executor = MultiThreadedExecutor()

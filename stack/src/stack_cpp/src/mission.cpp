@@ -513,7 +513,7 @@ void Mission::publishVehicleCommand(uint16_t command, float param1, float param2
   vehicle_command_publisher->publish(msg);
 }
 
-//check vehicle status before updating armed tag
+
 void Mission::arm() {
   publishVehicleCommand(VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0);
 

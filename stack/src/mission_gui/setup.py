@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-package_name = 'stack_py'
+package_name = 'mission_gui'
 
 setup(
     name=package_name,
@@ -24,10 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'gripper = stack_py.gripper:main',
-            'vision = stack_py.vision:main',
-            'marker = stack_py.marker:main',
-            'yolo = stack_py.yolo:main',
+            'mission_gui = mission_gui.mission_gui:main',
         ],
     },
 )
