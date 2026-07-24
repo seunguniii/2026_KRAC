@@ -2,6 +2,7 @@
 #include <chrono>
 #include <vector>
 #include <stdint.h>
+#include <cmath>
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
 
@@ -38,19 +39,22 @@ class OffboardControl : public rclcpp::Node {
           return;
         }
 
-        if(!armed_ && mission_mode_ == STANDBY) {
-          this->publish_vehicle_command(VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1, 6);
-          this->arm();
-        }
-        
-        if(mission_mode_ == STANDBY) {
-          this->set_origin();
-          if(set_origin_done) mission_mode_ = FLIGHT;
-        }
-
         publish_offboard_control_mode();
 
         switch(mission_mode_) {
+          case STANDBY:
+            if(!armed_) {
+              publish_vehicle_command(VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1, 6);
+              arm();
+              break;
+            }
+            
+            frd_to_ned();
+            if(frd_to_ned_done) set_origin();
+            if(set_origin_done && frd_to_ned_done) mission_mode_ = FLIGHT;
+            
+            break;
+            
           case FLIGHT:
             publish_trajectory_setpoint();
             break;
@@ -93,7 +97,7 @@ class OffboardControl : public rclcpp::Node {
 
     MissionMode mission_mode_ = STANDBY;
 
-    std::vector<std::array<float,3>> waypoints_ = {
+    std::vector<std::array<float,3>> waypoints_frd = {
       {0.0f, 0.0f, -2.0f},
       {2.0f, 0.0f, -2.0f},
       {0.0f, 0.0f, -2.0f},
@@ -101,6 +105,8 @@ class OffboardControl : public rclcpp::Node {
       {0.0f, 0.0f, -2.0f},
       {0.0f, 0.0f, -3.0f},
     };
+    
+    std::vector<std::array<float,3>> waypoints_ = waypoints_frd;
 
     uint64_t offboard_setpoint_counter_ {0};
     size_t wp_idx_ {0};
@@ -127,9 +133,43 @@ class OffboardControl : public rclcpp::Node {
     bool set_origin_done = false;
     int origin_counter = 0;
     int origin_count_threshold = 10;
+    
+    void frd_to_ned();
+    bool frd_to_ned_done = false;
+    
+    float nan = std::numeric_limits<float>::quiet_NaN();
 };
 
+void OffboardControl::frd_to_ned(){
+  if(frd_to_ned_done) return;
+  float w = curr_odom_.q[0];
+  float x = curr_odom_.q[1];
+  float y = curr_odom_.q[2];
+  float z = curr_odom_.q[3];
+  
+  float yaw = std::atan2(2.0f*(w*z + x*y), 1.0f - 2.0f*(y*y + z*z));
+  
+  float cos_yaw = std::cos(yaw);
+  float sin_yaw = std::sin(yaw);
+  
+  for (size_t i = 0; i < waypoints_frd.size(); i++) {
+    float F = waypoints_frd[i][0];
+    float R = waypoints_frd[i][1];
+    float D = waypoints_frd[i][2];
+    
+    float N = F*cos_yaw - R*sin_yaw;
+    float E = F*sin_yaw + R*cos_yaw;
+    
+    waypoints_[i] = {N, E, D};
+    
+  }
+  frd_to_ned_done = true;
+  RCLCPP_INFO(this->get_logger(), "Done parsing waypoints."); 
+}
+
 void OffboardControl::set_origin(){
+  if(set_origin_done) return;
+  
   if(origin_counter < origin_count_threshold){
     origin[0] += curr_odom_.position[0];
     origin[1] += curr_odom_.position[1];
@@ -210,6 +250,7 @@ void OffboardControl::publish_trajectory_setpoint() {
   }
   else return;
 
+  msg.yaw = nan;
   msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
   trajectory_setpoint_publisher_->publish(msg);
 }
