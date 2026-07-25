@@ -24,6 +24,7 @@ def generate_launch_description():
       executable='flight',
       parameters=[
         {"trajectory_dir": trajectory},
+        flight,
       ],
       name='flight',
       output='screen',

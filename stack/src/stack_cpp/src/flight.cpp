@@ -390,7 +390,7 @@ bool Flight::coordinatesFarEnough(float x1, float y1, float x2, float y2, float 
 
 int Flight::indexStep() {
   int step_ = 1;
-  float eps_ = cruise_speed*period_/horizon_scale;
+  float eps_ = cruise_speed*period_*horizon_scale;
   
   while(sp_idx_ + step_ < setpoints_.size() &&
         !coordinatesFarEnough(

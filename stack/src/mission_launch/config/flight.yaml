@@ -1,11 +1,11 @@
 flight:
-  ros_parameters:
+  ros__parameters:
     hold_threshold: 20
     origin_threshold: 10  
 
-    cruise_speed: 15
-    front_yaw: 0
-    back_yaw: 0
+    cruise_speed: 15.0
+    front_yaw: 0.0
+    back_yaw: 0.0
     
-    correction_weight: 0
-    horizon_scale: 1.0
+    correction_weight: 0.1
+    horizon_scale: 2.0
