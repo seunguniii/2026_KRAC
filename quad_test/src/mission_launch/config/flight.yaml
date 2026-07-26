@@ -1,0 +1,8 @@
+flight:
+  ros_parameters:
+    hold_threshold: 20
+    origin_threshold: 10  
+
+    trajectory_step: 0.5
+    straight_line_length: 2.0
+    arc_radius: 2.0

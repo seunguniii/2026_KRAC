@@ -1,0 +1,27 @@
+marker_recog:
+  ros_parameters:
+    frame_id: "camera_frame"
+    debug: true
+    show_window: false
+    frame_rate: 30.0
+    lidar_altitude: 0.17
+    lidar_attitude_gate_deg: 20.0
+
+    siyi_ip: "192.168.144.25"
+    siyi_port: 37260
+    auto_zoom_threshold_m: 10.0
+    auto_zoom_factor: 4.0
+    auto_zoom_enable: true
+
+    target_kf_process_var: 0.01
+    target_kf_measurement_var: 0.08
+    target_predict_timeout: 5.0
+
+    camera_rtsp_url: "rtsp://192.168.144.25:8554/main.264"
+    hw_decode: true
+
+    rtsp_port: 8555
+    rtsp_mount: "/debug"
+    stream_bitrate: 2000000
+    stream_scale: 0.5
+    stream_fps: 15
