@@ -1,0 +1,16 @@
+target:
+  ros__parameters:
+    land_param: 1
+    lost_abort_: 700
+    max_xy_: 0.4
+    tol_m_: 0.8
+    align_need_: 5
+    deadband_m_: 0.05
+    tanh_min_xy_: 0.10
+    tanh_gain_: 1.2
+    atan_position_gain_: 1.2
+    position_step_max_m_: 0.50
+    position_step_min_m_: 0.05
+    descent_high_mps_: 0.40
+    descent_mid_mps_: 0.30
+    descent_low_mps_: 0.20

@@ -304,17 +304,17 @@ class MissionGui(Node):
         key = cv2.waitKey(1) & 0xFF
 
 	#start
-        if key == ord('s'):
+        if key == ord('s') or key == ord('S'):
             self.get_logger().info("Starting MISSION node.")
             self.send_command(NodeName.MISSION, NodeState.BUSY)
 
         #abort mission
-        elif key == ord('a'):
+        elif key == ord('a') or key == ord('A'):
             self.get_logger().error("!!!ABORTING MISSION!!!")
             self.send_command(NodeName.MISSION, NodeState.ABORT)
             
         #quit gui
-        elif key == ord('q'):
+        elif key == ord('q') or key == ord('Q'):
             self.get_logger().info("Closing Mission GUI.")
             cv2.destroyAllWindows()
             rclpy.shutdown()

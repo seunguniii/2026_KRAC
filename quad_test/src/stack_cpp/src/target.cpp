@@ -61,14 +61,14 @@ class Target : public rclcpp::Node {
         [this](const VehicleOdometry::SharedPtr msg) {
           curr_odom_ = *msg;
         });
-      target_subscriber = this->create_subscription<Quaternion>(
+      target_subscriber = this->create_subscription<PointStamped>(
         "/nodes/marker/target",
         10,
         [this](const PointStamped::SharedPtr msg) {
           desired_x_ = msg->point.x;   // right(+), [m]
           desired_y_ = msg->point.y;   // forward(+), [m]
           acc_alt_ = msg->point.z;     // up(+), [m]
-          desired_yaw_ = msg->w; // use for RESCUE
+          //desired_yaw_ = msg->w; // use for RESCUE
           
           last_setpoint_time_ = this->now();
         });
@@ -103,7 +103,7 @@ class Target : public rclcpp::Node {
 
     rclcpp::Subscription<UInt32>::SharedPtr command_subscriber;
     rclcpp::Subscription<VehicleOdometry>::SharedPtr odometry_subscriber;
-    rclcpp::Subscription<geometry_msgs::msg::Quaternion>::SharedPtr target_subscriber;
+    rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr target_subscriber;
 
   
     VehicleOdometry curr_odom_;

@@ -10,6 +10,7 @@
 #include "px4_msgs/msg/vehicle_land_detected.hpp"
 #include "px4_msgs/msg/vehicle_odometry.hpp"
 #include "px4_msgs/msg/vehicle_status.hpp"
+#include "px4_msgs/msg/distance_sensor.hpp"
 
 #include "stack_cpp/mission_manager.h"
 
@@ -51,6 +52,14 @@ class Mission : public rclcpp::Node {
             RCLCPP_INFO(this->get_logger(), "Odometry recieved.");
           
 	  has_odom = true;
+        });
+        
+      lidar_subscriber = this->create_subscription<DistanceSensor>("/fmu/in/distance_sensor", rclcpp::SensorDataQoS(),
+        [this](const DistanceSensor::SharedPtr msg) {
+          if(!lidar_recieved)
+            RCLCPP_INFO(this->get_logger(), "LiDAR stream recieved");
+          
+	  lidar_recieved = true;
         });
         
       //TODO: the topic might not exist depending on the firmware version
@@ -183,12 +192,10 @@ class Mission : public rclcpp::Node {
           case MissionMode::LANDING:
             publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_GIMBAL_MANAGER_PITCHYAW, -90.0, 0.0, nan, nan, gimbal_device_flag);
             
-            if(((manager.get(NodeName::TARGET) != NodeState::BUSY) && (manager.get(NodeName::TARGET) != NodeState::SUCCESS))
-                || (manager.get(NodeName::MARKER) != NodeState::BUSY))
+            if((manager.get(NodeName::TARGET) != NodeState::BUSY) && (manager.get(NodeName::TARGET) != NodeState::SUCCESS))
               RCLCPP_WARN(this->get_logger(), "Some desired nodes might not be active.");
-          
+            
             if(manager.get(NodeName::TARGET) == NodeState::SUCCESS) {
-              RCLCPP_INFO(this->get_logger(), "Command MARKER to IDLE.");
               publishMissionCommand(NodeName::MARKER, NodeState::IDLE);
               RCLCPP_INFO(this->get_logger(), "Command TARGET to IDLE.");
               publishMissionCommand(NodeName::TARGET, NodeState::IDLE);
@@ -227,6 +234,7 @@ class Mission : public rclcpp::Node {
     rclcpp::Subscription<VehicleOdometry>::SharedPtr vehicle_odometry_subscriber;
     rclcpp::Subscription<VehicleLandDetected>::SharedPtr vehicle_land_detected_subscriber;
     rclcpp::Subscription<VehicleStatus>::SharedPtr vehicle_status_subscriber;
+    rclcpp::Subscription<DistanceSensor>::SharedPtr lidar_subscriber;
     
     MissionManager manager;
     
@@ -238,6 +246,7 @@ class Mission : public rclcpp::Node {
     
     bool has_odom = false;
     bool all_go = false;
+    bool lidar_recieved = false;
 
     void publishMissionSummary();
     void publishMissionCommand(NodeName node, NodeState state);
@@ -271,6 +280,7 @@ class Mission : public rclcpp::Node {
 bool Mission::skipStatusEval(NodeName node) {
   return (
     (node == NodeName::MISSION)
+    || (node == NodeName::MARKER)
     || (node == NodeName::VISION)
     || (node == NodeName::YOLO)
     || (node == NodeName::GRIPPER)
@@ -362,23 +372,30 @@ bool Mission::nodeTest(NodeName node, NodeState state) {
 }
 
 bool Mission::allGo() {  
-  RCLCPP_WARN(this->get_logger(), "Starting pre-mission test for MISSION");
+  RCLCPP_INFO(this->get_logger(), "Starting pre-mission test for MISSION");
   if(!nodeTest(NodeName::MISSION, NodeState::BUSY)) return false;
   
-  RCLCPP_WARN(this->get_logger(), "Starting pre-mission test for FLIGHT");
+  RCLCPP_INFO(this->get_logger(), "Starting pre-mission test for FLIGHT");
   if(!nodeTest(NodeName::FLIGHT, NodeState::IDLE)) return false;
   
-  RCLCPP_WARN(this->get_logger(), "Starting pre-mission test for TARGET");
+  RCLCPP_INFO(this->get_logger(), "Starting pre-mission test for TARGET");
   if(!nodeTest(NodeName::TARGET, NodeState::IDLE)) return false;
   
-  RCLCPP_WARN(this->get_logger(), "Skipping pre-mission test for VISION");
+  RCLCPP_INFO(this->get_logger(), "Skipping pre-mission test for VISION");
   //if(!nodeTest(NodeName::VISION, NodeState::BUSY)) return false;
   
-  RCLCPP_WARN(this->get_logger(), "Starting pre-mission test for MARKER");
-  if(!nodeTest(NodeName::MARKER, NodeState::IDLE)) return false;
+  RCLCPP_INFO(this->get_logger(), "Skipping pre-mission test for MARKER");
+  //if(!nodeTest(NodeName::MARKER, NodeState::IDLE)) return false;
 
-  RCLCPP_WARN(this->get_logger(), "Starting pre-mission test for LOGGER");
+  RCLCPP_INFO(this->get_logger(), "Starting pre-mission test for LOGGER");
   if(!nodeTest(NodeName::LOGGER, NodeState::BUSY)) return false;
+  
+  if(!lidar_recieved) {
+    RCLCPP_ERROR(this->get_logger(), "LiDAR stream has not been recieved.");
+    RCLCPP_ERROR(this->get_logger(), "LANDING sequence might not work as intended.");
+  }
+  else 
+  RCLCPP_INFO(this->get_logger(), "LiDAR recieved from Marker Recognition");
     
   return true;
 }

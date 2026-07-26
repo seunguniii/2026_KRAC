@@ -10,7 +10,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
 
 from std_msgs.msg import UInt32
-from geometry_msgs.msg import Quaternion
+from geometry_msgs.msg import PointStamped
 from sensor_msgs.msg import CompressedImage, PointCloud2
 from cv_bridge import CvBridge, CvBridgeError
 
@@ -56,7 +56,7 @@ class Marker(Node):
         self._bridge = CvBridge()
 
         self.status_publisher = self.create_publisher(UInt32, '/nodes/marker/status', 10)
-        self.target_publisher = self.create_publisher(Quaternion, '/nodes/marker/target', 10)
+        self.target_publisher = self.create_publisher(PointStamped, '/nodes/marker/target', 10)
         self.stream_publisher = self.create_publisher(CompressedImage, '/nodes/marker/stream', 10)
 
         self.stream_subscriber = self.create_subscription(
@@ -222,8 +222,8 @@ class Marker(Node):
         
 
     def _publish_coordinates(self, x: float, y: float, z: float):
-        msg = Quaternion()
-        msg.x, msg.y, msg.z = x, y, z
+        msg = PointStamped()
+        msg.point.x, msg.point.y, msg.point.z = x, y, z
         self.target_publisher.publish(msg)
 
 

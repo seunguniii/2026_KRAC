@@ -8,7 +8,6 @@ pkg_share = get_package_share_directory("mission_launch")
 
 flight = os.path.join(pkg_share, "config", "flight.yaml")
 target = os.path.join(pkg_share, "config", "target.yaml")
-marker_recog = os.path.join(pkg_share, "config", "marker_recog.yaml")
 
 def generate_launch_description():
   return LaunchDescription([
@@ -33,11 +32,16 @@ def generate_launch_description():
     
     Node(
       package='stack_py',
-      executable='marker_recog',
-      parameters=[
-        marker_recog,
-      ],
-      name='marker_recog',
+      executable='vision',
+      name='vision',
+      output='screen',
+      emulate_tty=True
+    ),
+    
+    Node(
+      package='stack_py',
+      executable='marker',
+      name='marker',
       output='screen',
       emulate_tty=True
     ),

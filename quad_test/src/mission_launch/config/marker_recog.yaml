@@ -1,5 +1,5 @@
 marker_recog:
-  ros_parameters:
+  ros__parameters:
     frame_id: "camera_frame"
     debug: true
     show_window: false
