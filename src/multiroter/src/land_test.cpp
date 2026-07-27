@@ -1,6 +1,8 @@
 #include <cmath>
+#include <cstddef>
 #include <iostream>
 #include <limits>
+#include <vector>
 
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
@@ -19,6 +21,10 @@ using namespace std::chrono_literals;
 using namespace px4_msgs::msg;
 
 namespace {
+
+// Timer period. The waypoint setpoint is advanced per cycle, so the speed
+// limits below are expressed in m/s and converted with this.
+constexpr float kCycleDt = 0.1f;
 
 float clamp_symmetric(float value, float limit) {
   if (value > limit) return limit;
@@ -88,6 +94,7 @@ public:
 
 private:
   enum Mission {
+    STANDBY,
     FLIGHT,
     LANDING,
     FINISHED,
@@ -96,12 +103,6 @@ private:
   enum LandingMode {
     POSITION_XY_VELOCITY_Z = 0,
     VELOCITY_XYZ = 1,
-  };
-
-  // start_mode_ == 1일 때 FLIGHT 단계를 둘로 쪼갠다.
-  enum FlightPhase {
-    CLIMB,      // 제자리에서 start_z_까지 수직 상승
-    TRANSLATE,  // 그 고도를 유지한 채 start_x_/start_y_로 수평 이동
   };
 
   // ROS
@@ -129,7 +130,7 @@ private:
   int preflight_setpoint_count_ = 0;
   int offboard_setpoint_counter_ = 0;
 
-  Mission mission_mode_ = FLIGHT;
+  Mission mission_mode_ = STANDBY;
 
   // Target state from vision node
   float desired_x_ = 0.0f;  // right(+), [m]
@@ -141,16 +142,6 @@ private:
 
   int lost_count_ = 0;
   int hold_counter_ = 0;
-
-  // FLIGHT 2단계(CLIMB -> TRANSLATE) 상태
-  FlightPhase flight_phase_ = CLIMB;
-  bool climb_origin_set_ = false;
-  float climb_x_ = 0.0f;
-  float climb_y_ = 0.0f;
-  float climb_z_ = 0.0f;    // FLIGHT 진입 시점 고도 (NED down)
-  float climb_yaw_ = 0.0f;  // FLIGHT 진입 시점 yaw [rad]
-  float climb_tol_m_ = 0.5f;
-  int climb_hold_need_ = 10;
 
   // 미션 시퀀스 연동
   bool exit_when_done_ = false;
@@ -165,11 +156,42 @@ private:
   int start_mode_ = 0;
   int land_mode_ = VELOCITY_XYZ;
 
-  // BODY/FRD 오프셋. 절대 NED 좌표가 아니라 FLIGHT 진입 시점의
-  // 기체 위치/기수 방향 기준 상대 이동량이다.
-  float start_x_ = 0.0f;  // 전방(+) [m]
-  float start_y_ = 0.0f;  // 우측(+) [m]
-  float start_z_ = 0.0f;  // 하강(+) [m] = -start_z_param
+  // Approach legs, expressed in BODY/FRD relative to the pose captured at
+  // start. NOT absolute NED: the drone always moves relative to where it was
+  // and which way it was facing when the node took over.
+  float start_forward_m_ = 0.0f;  // +x (forward) leg
+  float start_right_m_ = 0.0f;    // +y (right) leg
+  float start_up_m_ = 0.0f;       // climb, converted to -z (down) internally
+
+  float wp_reach_m_ = 0.5f;
+  int wp_hold_cycles_ = 20;
+
+  // Approach speed limits. The published setpoint creeps toward the waypoint at
+  // these rates instead of jumping, so PX4 never sees a step it wants to chase
+  // at MPC_XY_VEL_MAX / MPC_Z_VEL_MAX_UP.
+  float climb_speed_mps_ = 0.5f;
+  float cruise_speed_mps_ = 1.2f;
+
+  // Leash: how far the moving setpoint may get ahead of the vehicle. Stops the
+  // setpoint running away if the drone falls behind (wind, thrust limit).
+  // Must exceed the steady-state tracking error (cruise / MPC_XY_P, roughly
+  // 1.2 / 0.95 = 1.3 m) or the setpoint stalls and never reaches the waypoint.
+  float max_lead_m_ = 2.5f;
+
+  // The setpoint actually published during FLIGHT, advanced each cycle.
+  Eigen::Vector3f setpoint_pos_ = Eigen::Vector3f::Zero();
+
+  // Start pose in NED, captured before the first leg.
+  Eigen::Vector3f origin_ = Eigen::Vector3f::Zero();
+  float origin_yaw_ = 0.0f;
+  int origin_counter_ = 0;
+  const int origin_sample_count_ = 10;
+  bool origin_done_ = false;
+
+  // Legs converted into absolute NED setpoints, in order.
+  std::vector<Eigen::Vector3f> waypoints_ned_;
+  size_t wp_idx_ = 0;
+  int wp_hold_counter_ = 0;
 
   int lost_abort_ = 700;
   int align_need_ = 5;
@@ -205,6 +227,11 @@ private:
   void read_parameters();
   void timer_callback();
 
+  void capture_origin();
+  void build_waypoints();
+  void publish_hold_setpoint();
+  void advance_setpoint(const Eigen::Vector3f &target, const Eigen::Vector3f &current);
+
   void arm();
   void disarm();
 
@@ -231,17 +258,24 @@ void LandingTest::declare_parameters() {
   this->declare_parameter<int>("land_param", VELOCITY_XYZ);
 
   // 0: start landing immediately
-  // 1: FRD 접근 비행 후 착륙. start_x/y/z 는 절대 NED 가 아니라
-  //    FLIGHT 진입 시점의 기체 자세 기준 상대 오프셋이다.
+  // 1: fly the FRD approach legs first (climb -> right -> forward), then landing
   this->declare_parameter<int>("start_param", 0);
 
-  this->declare_parameter<float>("start_x_param", 0.0f);  // 전방(+) [m]
-  this->declare_parameter<float>("start_y_param", 0.0f);  // 우측(+) [m], 음수 = 좌측
-  this->declare_parameter<float>("start_z_param", 0.0f);  // 상승(+) [m]
+  // BODY/FRD offsets relative to the pose captured at start, NOT absolute NED.
+  this->declare_parameter<float>("start_x_param", 0.0f);  // forward leg [m]
+  this->declare_parameter<float>("start_y_param", 0.0f);  // right leg [m], negative = left
+  this->declare_parameter<float>("start_z_param", 0.0f);  // climb [m], positive = up
 
-  // start_param == 1일 때: 먼저 수직 상승, 그 다음 수평 이동.
-  this->declare_parameter<float>("climb_tol_m_", 0.5f);
-  this->declare_parameter<int>("climb_hold_need_", 10);
+  // Waypoint arrival gate. Legs are only a few metres long, so a 3 m threshold
+  // would skip them outright and hand over to LANDING while still moving.
+  this->declare_parameter<float>("wp_reach_m_", 0.5f);
+  this->declare_parameter<int>("wp_hold_cycles_", 20);
+
+  // Approach speeds [m/s]. Keep these well under MPC_Z_VEL_MAX_UP /
+  // MPC_XY_VEL_MAX so PX4 can always keep up with the moving setpoint.
+  this->declare_parameter<float>("climb_speed_mps_", 0.5f);
+  this->declare_parameter<float>("cruise_speed_mps_", 1.2f);
+  this->declare_parameter<float>("max_lead_m_", 2.5f);
 
   // 미션 시퀀스에서 다음 노드로 넘기기 위해 종료 시 프로세스를 내린다.
   this->declare_parameter<bool>("exit_when_done", false);
@@ -257,7 +291,7 @@ void LandingTest::declare_parameters() {
   this->declare_parameter<float>("setpoint_timeout_s_", 0.3f);
 
   // Speed slew limits [m/s per cycle]. 0.05 per 0.1 s cycle = 0.5 m/s^2.
-  // vz 만 제한하고 수평을 열어두면, OFFBOARD 진입이나 비전 측정 튐에서 한 사이클
+  // vz 만 제한하고 수평을 열어두면, 모드 전환이나 비전 측정 튐에서 한 사이클
   // 만에 0 -> max_xy_ 계단 입력이 나가 기체가 러칭한다. 둘 다 제한한다.
   this->declare_parameter<float>("descent_slew_mps_", 0.05f);
   this->declare_parameter<float>("xy_slew_mps_", 0.05f);
@@ -284,12 +318,17 @@ void LandingTest::read_parameters() {
   land_mode_ = this->get_parameter("land_param").as_int();
   start_mode_ = this->get_parameter("start_param").as_int();
 
-  start_x_ = static_cast<float>(this->get_parameter("start_x_param").as_double());
-  start_y_ = static_cast<float>(this->get_parameter("start_y_param").as_double());
-  start_z_ = -static_cast<float>(this->get_parameter("start_z_param").as_double());
+  start_forward_m_ = static_cast<float>(this->get_parameter("start_x_param").as_double());
+  start_right_m_ = static_cast<float>(this->get_parameter("start_y_param").as_double());
+  start_up_m_ = static_cast<float>(this->get_parameter("start_z_param").as_double());
 
-  climb_tol_m_ = static_cast<float>(this->get_parameter("climb_tol_m_").as_double());
-  climb_hold_need_ = static_cast<int>(this->get_parameter("climb_hold_need_").as_int());
+  wp_reach_m_ = static_cast<float>(this->get_parameter("wp_reach_m_").as_double());
+  wp_hold_cycles_ = this->get_parameter("wp_hold_cycles_").as_int();
+
+  climb_speed_mps_ = static_cast<float>(this->get_parameter("climb_speed_mps_").as_double());
+  cruise_speed_mps_ = static_cast<float>(this->get_parameter("cruise_speed_mps_").as_double());
+  max_lead_m_ = static_cast<float>(this->get_parameter("max_lead_m_").as_double());
+
   exit_when_done_ = this->get_parameter("exit_when_done").as_bool();
 
   lost_abort_ = this->get_parameter("lost_abort_").as_int();
@@ -338,7 +377,12 @@ void LandingTest::timer_callback() {
 
   read_parameters();
 
-  if (start_mode_ == 0 && mission_mode_ == FLIGHT) {
+  // start_param=0 이면 접근 비행이 없으므로 STANDBY 를 거치지 않는다.
+  // STANDBY 를 거치면 PX4 가 OFFBOARD 위치홀드로 먼저 진입한 뒤 곧바로
+  // position -> velocity 로 제어 모드가 바뀌면서 전환 충격이 생긴다.
+  // 처음부터 LANDING 으로 두면 OFFBOARD 진입 시점에 이미 속도제어 스트림이
+  // 흐르고 있어서 모드 전환이 POSITION -> OFFBOARD 한 번으로 끝난다.
+  if (start_mode_ == 0 && mission_mode_ == STANDBY) {
     mission_mode_ = LANDING;
   }
 
@@ -347,6 +391,15 @@ void LandingTest::timer_callback() {
   std_msgs::msg::String mission_msg;
 
   switch (mission_mode_) {
+    case STANDBY:
+      // Freeze on the captured start pose so PX4 gets a valid setpoint stream
+      // before OFFBOARD/ARM. Arming under a far-away setpoint is what made the
+      // old version lunge the moment offboard engaged.
+      capture_origin();
+      publish_hold_setpoint();
+      mission_msg.data = "STANDBY";
+      break;
+
     case FLIGHT:
       publish_trajectory_setpoint();
       mission_msg.data = "FLIGHT";
@@ -405,7 +458,145 @@ void LandingTest::timer_callback() {
     return;
   }
 
+  // Armed and holding on the start pose: commit to the mission.
+  // start_param=0 은 위에서 이미 LANDING 으로 넘어갔으므로 여기는 접근 비행 전용.
+  if (mission_mode_ == STANDBY && origin_done_) {
+    build_waypoints();
+    mission_mode_ = FLIGHT;
+  }
+
   offboard_setpoint_counter_++;
+}
+
+
+void LandingTest::capture_origin() {
+  if (origin_done_) return;
+
+  if (origin_counter_ < origin_sample_count_) {
+    origin_ += Eigen::Vector3f(
+      curr_odom_.position[0],
+      curr_odom_.position[1],
+      curr_odom_.position[2]);
+
+    origin_counter_++;
+    return;
+  }
+
+  origin_ /= static_cast<float>(origin_sample_count_);
+
+  const float w = curr_odom_.q[0];
+  const float x = curr_odom_.q[1];
+  const float y = curr_odom_.q[2];
+  const float z = curr_odom_.q[3];
+
+  origin_yaw_ = std::atan2(2.0f * (w * z + x * y), 1.0f - 2.0f * (y * y + z * z));
+
+  origin_done_ = true;
+
+  RCLCPP_INFO(
+    this->get_logger(),
+    "[ORIGIN] NED=(%.2f, %.2f, %.2f) yaw=%.1f deg",
+    origin_[0],
+    origin_[1],
+    origin_[2],
+    origin_yaw_ * 180.0f / static_cast<float>(M_PI));
+}
+
+
+void LandingTest::build_waypoints() {
+  // Cumulative BODY/FRD legs: x = forward, y = right, z = down.
+  const std::vector<Eigen::Vector3f> legs_frd = {
+    {0.0f,              0.0f,             -start_up_m_},  // 1) climb
+    {0.0f,              start_right_m_,   -start_up_m_},  // 2) sideways
+    {start_forward_m_,  start_right_m_,   -start_up_m_},  // 3) forward
+  };
+
+  const float cos_yaw = std::cos(origin_yaw_);
+  const float sin_yaw = std::sin(origin_yaw_);
+
+  waypoints_ned_.clear();
+  waypoints_ned_.reserve(legs_frd.size());
+
+  for (const auto &leg : legs_frd) {
+    const float f = leg[0];
+    const float r = leg[1];
+    const float d = leg[2];
+
+    // Rotate the FRD offset by the start yaw, then anchor it on the start pose.
+    const float north = f * cos_yaw - r * sin_yaw;
+    const float east = f * sin_yaw + r * cos_yaw;
+
+    waypoints_ned_.emplace_back(
+      origin_[0] + north,
+      origin_[1] + east,
+      origin_[2] + d);
+  }
+
+  wp_idx_ = 0;
+  wp_hold_counter_ = 0;
+
+  // Start the moving setpoint on the vehicle, not on the first waypoint.
+  setpoint_pos_ = origin_;
+
+  RCLCPP_INFO(
+    this->get_logger(),
+    "[FLIGHT] legs (FRD): up %.1f m -> right %.1f m -> forward %.1f m "
+    "(climb %.2f m/s, cruise %.2f m/s)",
+    start_up_m_,
+    start_right_m_,
+    start_forward_m_,
+    climb_speed_mps_,
+    cruise_speed_mps_);
+}
+
+
+void LandingTest::advance_setpoint(
+  const Eigen::Vector3f &target,
+  const Eigen::Vector3f &current) {
+  const Eigen::Vector3f to_target = target - setpoint_pos_;
+
+  // Horizontal and vertical are rate-limited separately so a diagonal leg does
+  // not climb faster than climb_speed_mps_.
+  Eigen::Vector2f step_xy(to_target[0], to_target[1]);
+  const float dist_xy = step_xy.norm();
+  const float max_step_xy = cruise_speed_mps_ * kCycleDt;
+
+  if (dist_xy > max_step_xy) {
+    step_xy *= max_step_xy / dist_xy;
+  }
+
+  const float step_z = clamp_symmetric(to_target[2], climb_speed_mps_ * kCycleDt);
+
+  const Eigen::Vector3f candidate =
+    setpoint_pos_ + Eigen::Vector3f(step_xy[0], step_xy[1], step_z);
+
+  // Hold the setpoint if the vehicle has not caught up yet, so the error (and
+  // therefore the commanded speed) stays bounded.
+  if ((candidate - current).norm() <= max_lead_m_) {
+    setpoint_pos_ = candidate;
+  }
+}
+
+
+void LandingTest::publish_hold_setpoint() {
+  TrajectorySetpoint msg{};
+
+  // Before the origin average completes there is nothing to hold but the
+  // current position.
+  const Eigen::Vector3f hold = origin_done_
+    ? origin_
+    : Eigen::Vector3f(
+        curr_odom_.position[0],
+        curr_odom_.position[1],
+        curr_odom_.position[2]);
+
+  msg.position = {hold[0], hold[1], hold[2]};
+  msg.velocity = {nan_, nan_, nan_};
+  msg.yaw = nan_;
+  msg.yawspeed = nan_;
+  msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+
+  trajectory_setpoint_publisher_->publish(msg);
 }
 
 
@@ -452,6 +643,10 @@ void LandingTest::publish_trajectory_setpoint() {
     return;
   }
 
+  if (waypoints_ned_.empty() || wp_idx_ >= waypoints_ned_.size()) {
+    return;
+  }
+
   TrajectorySetpoint msg{};
 
   Eigen::Vector3f current(
@@ -459,87 +654,63 @@ void LandingTest::publish_trajectory_setpoint() {
     curr_odom_.position[1],
     curr_odom_.position[2]);
 
-  // 처음부터 (x,y,z)를 한 번에 주면 대각선으로 급기동한다. 먼저 제자리에서
-  // start_z_까지 수직 상승한 뒤에 x/y로 수평 이동한다.
-  // 기준점(위치 + yaw)은 FLIGHT 에 진입한 첫 사이클에 한 번만 잡는다. 매 사이클
-  // 갱신하면 기체가 회전할 때 목표까지 같이 돌아 발산한다.
-  if (!climb_origin_set_) {
-    climb_x_ = current[0];
-    climb_y_ = current[1];
-    climb_z_ = current[2];
+  const Eigen::Vector3f &target = waypoints_ned_[wp_idx_];
+  const float dist = (target - current).norm();
 
-    const float qw = curr_odom_.q[0];
-    const float qx = curr_odom_.q[1];
-    const float qy = curr_odom_.q[2];
-    const float qz = curr_odom_.q[3];
+  // Creep the setpoint toward the waypoint instead of commanding it directly.
+  advance_setpoint(target, current);
 
-    climb_yaw_ = std::atan2(
-      2.0f * (qw * qz + qx * qy),
-      1.0f - 2.0f * (qy * qy + qz * qz));
-
-    climb_origin_set_ = true;
-
-    RCLCPP_INFO(
-      this->get_logger(),
-      "[FLIGHT] CLIMB: 제자리(%.2f, %.2f)에서 %.2f m 상승 (기준 yaw=%.1f deg)",
-      climb_x_, climb_y_, -start_z_,
-      climb_yaw_ * 180.0f / static_cast<float>(M_PI));
-  }
-
-  // FRD 오프셋을 진입 시점 yaw 로 회전해 절대 NED 목표로 변환한다.
-  const float cos_yaw = std::cos(climb_yaw_);
-  const float sin_yaw = std::sin(climb_yaw_);
-
-  const float north = start_x_ * cos_yaw - start_y_ * sin_yaw;
-  const float east = start_x_ * sin_yaw + start_y_ * cos_yaw;
-
-  const Eigen::Vector3f target =
-    (flight_phase_ == CLIMB)
-      ? Eigen::Vector3f(climb_x_, climb_y_, climb_z_ + start_z_)
-      : Eigen::Vector3f(climb_x_ + north, climb_y_ + east, climb_z_ + start_z_);
-
-  msg.position = {target[0], target[1], target[2]};
+  msg.position = {setpoint_pos_[0], setpoint_pos_[1], setpoint_pos_[2]};
+  msg.velocity = {nan_, nan_, nan_};
 
   // Hold current heading; leaving yaw at 0 would command a spin to North.
   msg.yaw = nan_;
   msg.yawspeed = nan_;
 
-  if (flight_phase_ == CLIMB) {
-    // 고도만 본다. x/y는 아직 건드리지 않으므로 3D 거리로 판정하면 안 된다.
-    if (std::fabs(current[2] - target[2]) < climb_tol_m_) {
-      hold_counter_++;
-
-      if (hold_counter_ > climb_hold_need_) {
-        hold_counter_ = 0;
-        flight_phase_ = TRANSLATE;
-
-        RCLCPP_INFO(
-          this->get_logger(),
-          "[FLIGHT] 상승 완료 (alt=%.2f m) -> TRANSLATE: 전방 %.2f m / 우측 %.2f m 이동",
-          -current[2], start_x_, start_y_);
-      }
-    } else {
-      hold_counter_ = 0;
-    }
-  } else {
-    const float dist = (target - current).norm();
-
-    if (dist < 3.0f) {
-      hold_counter_++;
-
-      if (hold_counter_ > 20) {
-        hold_counter_ = 0;
-        mission_mode_ = LANDING;
-        RCLCPP_INFO(this->get_logger(), "[LANDING] Initiating landing sequence");
-        return;
-      }
-    } else {
-      hold_counter_ = 0;
-    }
-  }
-
   msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
   trajectory_setpoint_publisher_->publish(msg);
+
+  RCLCPP_INFO_THROTTLE(
+    this->get_logger(),
+    *this->get_clock(),
+    1000,
+    "[FLIGHT] wp %zu/%zu dist=%.2f m lead=%.2f m hold=%d/%d",
+    wp_idx_ + 1,
+    waypoints_ned_.size(),
+    dist,
+    (setpoint_pos_ - current).norm(),
+    wp_hold_counter_,
+    wp_hold_cycles_);
+
+  if (dist >= wp_reach_m_) {
+    wp_hold_counter_ = 0;
+    return;
+  }
+
+  wp_hold_counter_++;
+
+  if (wp_hold_counter_ <= wp_hold_cycles_) {
+    return;
+  }
+
+  wp_hold_counter_ = 0;
+  wp_idx_++;
+
+  if (wp_idx_ < waypoints_ned_.size()) {
+    RCLCPP_INFO(
+      this->get_logger(),
+      "[FLIGHT] waypoint reached, heading to %zu/%zu",
+      wp_idx_ + 1,
+      waypoints_ned_.size());
+
+    return;
+  }
+
+  // hold_counter_ is shared with the landing alignment gate.
+  hold_counter_ = 0;
+  mission_mode_ = LANDING;
+
+  RCLCPP_INFO(this->get_logger(), "[LANDING] Initiating landing sequence");
 }
 
 
