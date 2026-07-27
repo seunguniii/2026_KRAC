@@ -60,7 +60,11 @@ public:
         desired_x_ = msg->point.x;   // right(+), [m]
         desired_y_ = msg->point.y;   // forward(+), [m]
         acc_alt_ = -msg->point.z;    // existing convention
+        last_setpoint_time_ = this->now();
+        has_setpoint_ = true;
       });
+
+    last_setpoint_time_ = this->now();
 
     declare_parameters();
 
@@ -79,6 +83,9 @@ public:
     timer_ = this->create_wall_timer(100ms, [this]() { timer_callback(); });
   }
 
+  // 미션 루프가 성공(0)과 타겟 상실 중단(2)을 구분할 수 있게 한다.
+  int exit_code() const { return exit_code_; }
+
 private:
   enum Mission {
     FLIGHT,
@@ -89,6 +96,12 @@ private:
   enum LandingMode {
     POSITION_XY_VELOCITY_Z = 0,
     VELOCITY_XYZ = 1,
+  };
+
+  // start_mode_ == 1일 때 FLIGHT 단계를 둘로 쪼갠다.
+  enum FlightPhase {
+    CLIMB,      // 제자리에서 start_z_까지 수직 상승
+    TRANSLATE,  // 그 고도를 유지한 채 start_x_/start_y_로 수평 이동
   };
 
   // ROS
@@ -123,19 +136,48 @@ private:
   float desired_y_ = 0.0f;  // forward(+), [m]
   float acc_alt_ = 0.0f;
 
+  bool has_setpoint_ = false;
+  rclcpp::Time last_setpoint_time_;
+
   int lost_count_ = 0;
   int hold_counter_ = 0;
+
+  // FLIGHT 2단계(CLIMB -> TRANSLATE) 상태
+  FlightPhase flight_phase_ = CLIMB;
+  bool climb_origin_set_ = false;
+  float climb_x_ = 0.0f;
+  float climb_y_ = 0.0f;
+  float climb_z_ = 0.0f;    // FLIGHT 진입 시점 고도 (NED down)
+  float climb_yaw_ = 0.0f;  // FLIGHT 진입 시점 yaw [rad]
+  float climb_tol_m_ = 0.5f;
+  int climb_hold_need_ = 10;
+
+  // 미션 시퀀스 연동
+  bool exit_when_done_ = false;
+  bool abort_exit_ = false;
+  int exit_code_ = 0;
+  int exit_delay_ = 0;
+
+  float descent_cmd_ = 0.0f;  // slew-limited descent speed [m/s]
+  float v_cmd_ = 0.0f;        // slew-limited horizontal speed [m/s]
 
   // Parameters
   int start_mode_ = 0;
   int land_mode_ = VELOCITY_XYZ;
 
-  float start_x_ = 0.0f;
-  float start_y_ = 0.0f;
-  float start_z_ = 0.0f;
+  // BODY/FRD 오프셋. 절대 NED 좌표가 아니라 FLIGHT 진입 시점의
+  // 기체 위치/기수 방향 기준 상대 이동량이다.
+  float start_x_ = 0.0f;  // 전방(+) [m]
+  float start_y_ = 0.0f;  // 우측(+) [m]
+  float start_z_ = 0.0f;  // 하강(+) [m] = -start_z_param
 
   int lost_abort_ = 700;
   int align_need_ = 5;
+  int hold_decay_ = 2;  // hold_counter_ decay per misaligned cycle (soft reset)
+
+  float setpoint_timeout_s_ = 0.5f;  // vision setpoint considered stale after this
+  float descent_slew_mps_ = 0.05f;   // max descent-speed change per cycle
+  float xy_slew_mps_ = 0.05f;        // max horizontal-speed change per cycle
 
   float max_xy_ = 0.6f;
   float tol_m_ = 0.8f;
@@ -189,17 +231,36 @@ void LandingTest::declare_parameters() {
   this->declare_parameter<int>("land_param", VELOCITY_XYZ);
 
   // 0: start landing immediately
-  // 1: fly to start_x/y/z first, then landing
+  // 1: FRD 접근 비행 후 착륙. start_x/y/z 는 절대 NED 가 아니라
+  //    FLIGHT 진입 시점의 기체 자세 기준 상대 오프셋이다.
   this->declare_parameter<int>("start_param", 0);
 
-  this->declare_parameter<float>("start_x_param", 0.0f);
-  this->declare_parameter<float>("start_y_param", 0.0f);
-  this->declare_parameter<float>("start_z_param", 0.0f);
+  this->declare_parameter<float>("start_x_param", 0.0f);  // 전방(+) [m]
+  this->declare_parameter<float>("start_y_param", 0.0f);  // 우측(+) [m], 음수 = 좌측
+  this->declare_parameter<float>("start_z_param", 0.0f);  // 상승(+) [m]
+
+  // start_param == 1일 때: 먼저 수직 상승, 그 다음 수평 이동.
+  this->declare_parameter<float>("climb_tol_m_", 0.5f);
+  this->declare_parameter<int>("climb_hold_need_", 10);
+
+  // 미션 시퀀스에서 다음 노드로 넘기기 위해 종료 시 프로세스를 내린다.
+  this->declare_parameter<bool>("exit_when_done", false);
 
   this->declare_parameter<int>("lost_abort_", 700);
   this->declare_parameter<float>("max_xy_", 0.4f);
   this->declare_parameter<float>("tol_m_", 0.8f);
   this->declare_parameter<int>("align_need_", 5);
+  this->declare_parameter<int>("hold_decay_", 2);
+
+  // Vision setpoint older than this (seconds) is treated as lost. Keep it above
+  // the vision publish period so normal message gaps do not flap valid/invalid.
+  this->declare_parameter<float>("setpoint_timeout_s_", 0.3f);
+
+  // Speed slew limits [m/s per cycle]. 0.05 per 0.1 s cycle = 0.5 m/s^2.
+  // vz 만 제한하고 수평을 열어두면, OFFBOARD 진입이나 비전 측정 튐에서 한 사이클
+  // 만에 0 -> max_xy_ 계단 입력이 나가 기체가 러칭한다. 둘 다 제한한다.
+  this->declare_parameter<float>("descent_slew_mps_", 0.05f);
+  this->declare_parameter<float>("xy_slew_mps_", 0.05f);
 
   this->declare_parameter<float>("deadband_m_", 0.05f);
 
@@ -227,8 +288,20 @@ void LandingTest::read_parameters() {
   start_y_ = static_cast<float>(this->get_parameter("start_y_param").as_double());
   start_z_ = -static_cast<float>(this->get_parameter("start_z_param").as_double());
 
+  climb_tol_m_ = static_cast<float>(this->get_parameter("climb_tol_m_").as_double());
+  climb_hold_need_ = static_cast<int>(this->get_parameter("climb_hold_need_").as_int());
+  exit_when_done_ = this->get_parameter("exit_when_done").as_bool();
+
   lost_abort_ = this->get_parameter("lost_abort_").as_int();
   align_need_ = this->get_parameter("align_need_").as_int();
+  hold_decay_ = this->get_parameter("hold_decay_").as_int();
+
+  setpoint_timeout_s_ =
+    static_cast<float>(this->get_parameter("setpoint_timeout_s_").as_double());
+  descent_slew_mps_ =
+    static_cast<float>(this->get_parameter("descent_slew_mps_").as_double());
+  xy_slew_mps_ =
+    static_cast<float>(this->get_parameter("xy_slew_mps_").as_double());
 
   max_xy_ = static_cast<float>(this->get_parameter("max_xy_").as_double());
   tol_m_ = static_cast<float>(this->get_parameter("tol_m_").as_double());
@@ -293,6 +366,20 @@ void LandingTest::timer_callback() {
 
       mission_msg.data = "FINISHED";
       mission_mode_publisher_->publish(mission_msg);
+
+      // 미션 시퀀스에서는 이 노드가 끝나야 다음 단계로 넘어간다.
+      // disarm이 반영될 시간을 조금 준 뒤 내려간다.
+      if (exit_when_done_) {
+        if (disarm_sent_ || abort_exit_) {
+          if (++exit_delay_ > 10) {
+            RCLCPP_INFO(
+              this->get_logger(),
+              "[EXIT] 착륙 시퀀스 종료 (code=%d)", exit_code_);
+            rclcpp::shutdown();
+          }
+        }
+      }
+
       return;
   }
 
@@ -372,23 +459,83 @@ void LandingTest::publish_trajectory_setpoint() {
     curr_odom_.position[1],
     curr_odom_.position[2]);
 
-  Eigen::Vector3f target(start_x_, start_y_, start_z_);
-  Eigen::Vector3f to_wp = target - current;
-  const float dist = to_wp.norm();
+  // 처음부터 (x,y,z)를 한 번에 주면 대각선으로 급기동한다. 먼저 제자리에서
+  // start_z_까지 수직 상승한 뒤에 x/y로 수평 이동한다.
+  // 기준점(위치 + yaw)은 FLIGHT 에 진입한 첫 사이클에 한 번만 잡는다. 매 사이클
+  // 갱신하면 기체가 회전할 때 목표까지 같이 돌아 발산한다.
+  if (!climb_origin_set_) {
+    climb_x_ = current[0];
+    climb_y_ = current[1];
+    climb_z_ = current[2];
+
+    const float qw = curr_odom_.q[0];
+    const float qx = curr_odom_.q[1];
+    const float qy = curr_odom_.q[2];
+    const float qz = curr_odom_.q[3];
+
+    climb_yaw_ = std::atan2(
+      2.0f * (qw * qz + qx * qy),
+      1.0f - 2.0f * (qy * qy + qz * qz));
+
+    climb_origin_set_ = true;
+
+    RCLCPP_INFO(
+      this->get_logger(),
+      "[FLIGHT] CLIMB: 제자리(%.2f, %.2f)에서 %.2f m 상승 (기준 yaw=%.1f deg)",
+      climb_x_, climb_y_, -start_z_,
+      climb_yaw_ * 180.0f / static_cast<float>(M_PI));
+  }
+
+  // FRD 오프셋을 진입 시점 yaw 로 회전해 절대 NED 목표로 변환한다.
+  const float cos_yaw = std::cos(climb_yaw_);
+  const float sin_yaw = std::sin(climb_yaw_);
+
+  const float north = start_x_ * cos_yaw - start_y_ * sin_yaw;
+  const float east = start_x_ * sin_yaw + start_y_ * cos_yaw;
+
+  const Eigen::Vector3f target =
+    (flight_phase_ == CLIMB)
+      ? Eigen::Vector3f(climb_x_, climb_y_, climb_z_ + start_z_)
+      : Eigen::Vector3f(climb_x_ + north, climb_y_ + east, climb_z_ + start_z_);
 
   msg.position = {target[0], target[1], target[2]};
 
-  if (dist < 3.0f) {
-    hold_counter_++;
+  // Hold current heading; leaving yaw at 0 would command a spin to North.
+  msg.yaw = nan_;
+  msg.yawspeed = nan_;
 
-    if (hold_counter_ > 20) {
+  if (flight_phase_ == CLIMB) {
+    // 고도만 본다. x/y는 아직 건드리지 않으므로 3D 거리로 판정하면 안 된다.
+    if (std::fabs(current[2] - target[2]) < climb_tol_m_) {
+      hold_counter_++;
+
+      if (hold_counter_ > climb_hold_need_) {
+        hold_counter_ = 0;
+        flight_phase_ = TRANSLATE;
+
+        RCLCPP_INFO(
+          this->get_logger(),
+          "[FLIGHT] 상승 완료 (alt=%.2f m) -> TRANSLATE: 전방 %.2f m / 우측 %.2f m 이동",
+          -current[2], start_x_, start_y_);
+      }
+    } else {
       hold_counter_ = 0;
-      mission_mode_ = LANDING;
-      RCLCPP_INFO(this->get_logger(), "[LANDING] Initiating landing sequence");
-      return;
     }
   } else {
-    hold_counter_ = 0;
+    const float dist = (target - current).norm();
+
+    if (dist < 3.0f) {
+      hold_counter_++;
+
+      if (hold_counter_ > 20) {
+        hold_counter_ = 0;
+        mission_mode_ = LANDING;
+        RCLCPP_INFO(this->get_logger(), "[LANDING] Initiating landing sequence");
+        return;
+      }
+    } else {
+      hold_counter_ = 0;
+    }
   }
 
   msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
@@ -439,9 +586,22 @@ Eigen::Vector3f LandingTest::body_frd_to_ned(const Eigen::Vector3f &body_frd) co
 void LandingTest::land() {
   TrajectorySetpoint msg{};
 
+  // Hold current heading throughout landing; yaw=0 (the msg{} default) would
+  // command a spin to North on every setpoint.
+  msg.yaw = nan_;
+  msg.yawspeed = nan_;
+
   const float alt_m = -acc_alt_;
 
+  // Fix: staleness. isfinite() alone stays true when the vision node dies
+  // silently (last values freeze), so the lost-target safety never fires.
+  // Require a fresh setpoint as well.
+  const double setpoint_age =
+    has_setpoint_ ? (this->now() - last_setpoint_time_).seconds() : 1.0e9;
+  const bool fresh = setpoint_age < setpoint_timeout_s_;
+
   const bool valid_xy =
+    fresh &&
     std::isfinite(desired_x_) &&
     std::isfinite(desired_y_);
 
@@ -455,7 +615,9 @@ void LandingTest::land() {
     hold_counter_ = 0;
   } else {
     lost_count_ = 0;
-    hold_counter_ = aligned ? hold_counter_ + 1 : 0;
+    // Soft decay instead of hard reset so a brief excursion past tol_m_ does
+    // not instantly zero the descent gate (avoids stutter descent).
+    hold_counter_ = aligned ? hold_counter_ + 1 : std::max(0, hold_counter_ - hold_decay_);
   }
 
   if (lost_count_ > lost_abort_) {
@@ -469,6 +631,8 @@ void LandingTest::land() {
       3.0f);
 
     mission_mode_ = FINISHED;
+    abort_exit_ = true;
+    exit_code_ = 2;  // 타겟 상실 중단. 미션 루프가 성공과 구분할 수 있게.
     return;
   }
 
@@ -476,7 +640,22 @@ void LandingTest::land() {
   const float ey = valid_xy ? desired_y_ : 0.0f;  // forward(+)
   const float err_dist = std::sqrt(ex * ex + ey * ey);
 
-  const float descent_mps = select_descent_speed(alt_m, valid_xy);
+  // OFFBOARD 진입 전 약 2초 동안 PX4 는 setpoint 를 무시한다(모드 전환 전에
+  // setpoint 스트림이 먼저 흘러야 하기 때문). 그 사이에 램프가 미리 쌓이면
+  // 진입하는 순간 최대 속도 명령이 그대로 들어가므로, 진입 전까지 0 으로 묶는다.
+  const bool control_engaged = offboard_requested_ && arm_requested_;
+
+  const float descent_target =
+    control_engaged ? select_descent_speed(alt_m, valid_xy) : 0.0f;
+
+  // Slew-limit the descent speed so vz never steps abruptly (including the
+  // drop to 0 when alignment is briefly lost).
+  if (descent_target > descent_cmd_) {
+    descent_cmd_ = std::min(descent_target, descent_cmd_ + descent_slew_mps_);
+  } else {
+    descent_cmd_ = std::max(descent_target, descent_cmd_ - descent_slew_mps_);
+  }
+  const float descent_mps = descent_cmd_;
 
   if (land_mode_ == POSITION_XY_VELOCITY_Z) {
     Eigen::Vector3f current_ned(
@@ -487,7 +666,7 @@ void LandingTest::land() {
     float xy_step = 0.0f;
     Eigen::Vector3f target_body_frd(0.0f, 0.0f, 0.0f);
 
-    if (valid_xy && err_dist >= deadband_m_) {
+    if (control_engaged && valid_xy && err_dist >= deadband_m_) {
       const float ux = ex / err_dist;  // right ratio
       const float uy = ey / err_dist;  // forward ratio
 
@@ -526,20 +705,30 @@ void LandingTest::land() {
       descent_mps,
       alt_m);
   } else {
-    float v_forward = 0.0f;
-    float v_right = 0.0f;
-    float v_close = 0.0f;
+    float ux = 0.0f;  // right ratio
+    float uy = 0.0f;  // forward ratio
+    float v_target = 0.0f;
 
-    if (valid_xy && err_dist >= deadband_m_) {
-      const float ux = ex / err_dist;  // right ratio
-      const float uy = ey / err_dist;  // forward ratio
+    if (control_engaged && valid_xy && err_dist >= deadband_m_) {
+      ux = ex / err_dist;
+      uy = ey / err_dist;
 
-      v_close = max_xy_ * std::tanh(tanh_gain_ * err_dist);
-      v_close = clamp_range(v_close, tanh_min_xy_, max_xy_);
-
-      v_right = clamp_symmetric(v_close * ux, max_xy_);
-      v_forward = clamp_symmetric(v_close * uy, max_xy_);
+      v_target = max_xy_ * std::tanh(tanh_gain_ * err_dist);
+      v_target = clamp_range(v_target, tanh_min_xy_, max_xy_);
     }
+
+    // vz 와 동일하게 수평 속도 "크기"만 slew 한다. 방향(ux, uy)은 제한하지
+    // 않으므로 타겟을 놓치면(ux=uy=0) 출력은 즉시 0 이 된다 - 감속은 늦추지 않는다.
+    if (v_target > v_cmd_) {
+      v_cmd_ = std::min(v_target, v_cmd_ + xy_slew_mps_);
+    } else {
+      v_cmd_ = std::max(v_target, v_cmd_ - xy_slew_mps_);
+    }
+
+    const float v_close = v_cmd_;
+
+    const float v_right = clamp_symmetric(v_close * ux, max_xy_);
+    const float v_forward = clamp_symmetric(v_close * uy, max_xy_);
 
     Eigen::Vector3f v_body(v_forward, v_right, 0.0f);
     Eigen::Vector3f v_ned = body_frd_to_ned(v_body);
@@ -550,11 +739,13 @@ void LandingTest::land() {
 
     RCLCPP_INFO(
       this->get_logger(),
-      "[VEL_XYZ] dx=%.3f dy=%.3f err=%.3f tol=%.3f v_close=%.3f vz=%.3f alt=%.3f",
+      "[VEL_XYZ] eng=%d dx=%.3f dy=%.3f err=%.3f tol=%.3f v_tgt=%.3f v_close=%.3f vz=%.3f alt=%.3f",
+      control_engaged,
       desired_x_,
       desired_y_,
       err_dist,
       tol_m_,
+      v_target,
       v_close,
       descent_mps,
       alt_m);
@@ -609,8 +800,12 @@ int main(int argc, char *argv[]) {
   setvbuf(stdout, NULL, _IONBF, BUFSIZ);
 
   rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<LandingTest>());
+
+  auto node = std::make_shared<LandingTest>();
+  rclcpp::spin(node);
+
+  const int code = node->exit_code();
   rclcpp::shutdown();
 
-  return 0;
+  return code;
 }
