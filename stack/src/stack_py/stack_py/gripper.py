@@ -46,7 +46,7 @@ class Gripper(Node):
         self.mm = MissionManager()
         self.self_state = NodeState.IDLE
         
-        self.timer = self.create_timer(1.0/FPS, self.report_status)
+        self.timer = self.create_timer(0.1, self.report_status)
 
 
     def command_callback(self, msg):
@@ -67,7 +67,7 @@ class Gripper(Node):
 
 
     #main logic
-    def stream_callback(self, msg: CompressedImage) -> None:
+    def gripper_callback(self) -> None:
         if self.self_state != NodeState.BUSY:
             return
         

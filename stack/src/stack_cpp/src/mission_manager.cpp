@@ -1,5 +1,6 @@
 #include "stack_cpp/mission_manager.h"
 #include <iostream>
+#include <string>
 
 MissionManager::MissionManager()
   : data(0)
@@ -74,6 +75,63 @@ MissionMode MissionManager::get_mode(uint32_t cmd){
   return static_cast<MissionMode>((cmd >> SHIFT_MODE) & MASK_MODE);
 }
 
+
+std::string MissionManager::get_node_str(NodeName node) const {
+  std::string str;
+  switch(node){
+    case NodeName::MISSION:
+      str = "MISSION";
+      break;
+    case NodeName::FLIGHT:
+      str = "FLIGHT";
+      break;
+    case NodeName::TARGET:
+      str = "TARGET";
+      break;
+    case NodeName::GRIPPER:
+      str = "GRIPPER";
+      break;
+    case NodeName::VISION:
+      str = "VISION";
+      break;
+    case NodeName::MARKER:
+      str = "MARKER";
+      break;
+    case NodeName::YOLO:
+      str = "YOLO";
+      break;
+    case NodeName::LOGGER:
+      str = "LOGGER";
+      break;
+    default:
+      str = "[ERROR] Node doesn't exist";
+      break;
+  }
+  return str;
+}
+
+
+std::string MissionManager::get_state_str(NodeState state) const {
+  std::string str;
+  switch(state){
+    case NodeState::IDLE:
+      str = "IDLE";
+      break;
+    case NodeState::BUSY:
+      str = "BUSY";
+      break;
+    case NodeState::SUCCESS:
+      str = "SUCCESS";
+      break;
+    case NodeState::ABORT:
+      str = "ABORT";
+      break;
+    default:
+      str = "[ERROR] Node doesn't exist";
+      break;
+  }
+  return str;
+}
 //TODO
 /*
 bool isError(int node);

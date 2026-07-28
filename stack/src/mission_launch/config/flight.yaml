@@ -7,5 +7,5 @@ flight:
     front_yaw: 0.0
     back_yaw: 0.0
     
-    correction_weight: 0.1
-    horizon_scale: 2.0
+    trajectory_correction_weight: 0.003
+    trajectory_horizon_scale: 20.0

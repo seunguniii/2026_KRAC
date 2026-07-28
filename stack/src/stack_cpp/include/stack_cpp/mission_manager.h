@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 enum class MissionMode {
   IDLE = 0,
@@ -52,6 +53,9 @@ class MissionManager{
     //used by both
     NodeState get(NodeName node) const;				//slaves only use on themselves
     MissionMode get_mode() const;
+    
+    std::string get_node_str(NodeName node) const;
+    std::string get_state_str(NodeState state) const;
     
   private:
     uint32_t data;

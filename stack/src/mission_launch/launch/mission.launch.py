@@ -56,7 +56,7 @@ def generate_launch_description():
     ),
     
     Node(
-      package='stack_cpp',
+      package='stack_py',
       executable='gripper',
       name='gripper',
       output='screen',

@@ -24,7 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'mission_gui = mission_gui.mission_gui:main',
+            'mission_gui=mission_gui.mission_gui:main',
         ],
     },
 )

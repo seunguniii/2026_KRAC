@@ -138,13 +138,7 @@ class Mission : public rclcpp::Node {
         publishOffboardControlMode();
         //main logic
         switch(mission_mode){
-          case MissionMode::IDLE:
-            if(!armed){
-              this->publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1, 6);
-              arm();
-              break;
-            }
-            
+          case MissionMode::IDLE:            
             if(manager.get(NodeName::LOGGER) == NodeState::IDLE) {
               RCLCPP_INFO(this->get_logger(), "Sending activation command to LOGGER.");
               publishMissionCommand(NodeName::LOGGER, NodeState::BUSY);
@@ -160,12 +154,13 @@ class Mission : public rclcpp::Node {
               RCLCPP_INFO(this->get_logger(), "Configure gimbal control to offboard.");
               //TODO: find appropriate sysid/compid for actual aircraft
               publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_GIMBAL_MANAGER_CONFIGURE, 1, 1);
-              RCLCPP_INFO(this->get_logger(), "Sending activation command to FLIGHT.");
-              publishMissionCommand(NodeName::FLIGHT, NodeState::BUSY, MissionMode::WP_FLIGHT);
-              
-              mission_mode = MissionMode::WP_FLIGHT;
-              RCLCPP_INFO(this->get_logger(), "MissionMode: Waypoint Flight"); 
             }
+            if(!armed){
+              this->publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1, 6);
+              arm();
+              break;
+            }
+            enterWP_FLIGHT();
             break;
           
          
@@ -175,18 +170,8 @@ class Mission : public rclcpp::Node {
               RCLCPP_WARN(this->get_logger(), "Some desired nodes might not be active.");
               
             if(manager.get(NodeName::FLIGHT) == NodeState::SUCCESS) {
-              RCLCPP_INFO(this->get_logger(), "Command FLIGHT to IDLE.");
-              publishMissionCommand(NodeName::FLIGHT, NodeState::IDLE);
-              
-              RCLCPP_INFO(this->get_logger(), "Sending activation command to TARGET.");
-              publishMissionCommand(NodeName::TARGET, NodeState::BUSY, MissionMode::RESCUE);
-              RCLCPP_INFO(this->get_logger(), "Sending activation command to GRIPPER.");
-              publishMissionCommand(NodeName::GRIPPER, NodeState::BUSY, MissionMode::RESCUE);
-              RCLCPP_INFO(this->get_logger(), "Sending activation command to YOLO.");
-              publishMissionCommand(NodeName::YOLO, NodeState::BUSY);
-              
-              mission_mode = MissionMode::RESCUE;
-              RCLCPP_INFO(this->get_logger(), "MissionMode: Rescue");
+              exitWP_FLIGHT();
+              enterRESCUE();
             }
             break;
           
@@ -200,43 +185,22 @@ class Mission : public rclcpp::Node {
                   || (manager.get(NodeName::YOLO) != NodeState::BUSY))
                 RCLCPP_WARN(this->get_logger(), "Some desired nodes might not be active.");
                 
+            //TODO: rid IDLE tag for GRIPPER
             if(manager.get(NodeName::TARGET) == NodeState::SUCCESS &&
-               manager.get(NodeName::GRIPPER) == NodeState::SUCCESS)
+               (manager.get(NodeName::GRIPPER) == NodeState::SUCCESS || manager.get(NodeName::GRIPPER) == NodeState::BUSY))
             {
-              RCLCPP_INFO(this->get_logger(), "Command TARGET to IDLE.");
-              publishMissionCommand(NodeName::TARGET, NodeState::IDLE);
-              RCLCPP_INFO(this->get_logger(), "Command GRIPPER to IDLE.");
-              publishMissionCommand(NodeName::GRIPPER, NodeState::IDLE);
-              RCLCPP_INFO(this->get_logger(), "Command YOLO to IDLE.");
-              publishMissionCommand(NodeName::YOLO, NodeState::IDLE);
-          
-              RCLCPP_INFO(this->get_logger(), "Sending activation command to FLIGHT.");
-              publishMissionCommand(NodeName::FLIGHT, NodeState::BUSY, MissionMode::INVERSE_WP_FLIGHT);
-                            
-              mission_mode = MissionMode::INVERSE_WP_FLIGHT;
-              RCLCPP_INFO(this->get_logger(), "MissionMode: Inverse Waypoint Flight.");
+              exitRESCUE();
+              enterINVERSE_WP_FLIGHT();
             }
             break;
           
           
           case MissionMode::INVERSE_WP_FLIGHT:
             publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_GIMBAL_MANAGER_PITCHYAW, 0.0, 0.0, nan, nan, gimbal_device_flag);
-            if(manager.get(NodeName::FLIGHT) != NodeState::BUSY)
+            if(manager.get(NodeName::FLIGHT) != NodeState::BUSY) {
               RCLCPP_WARN(this->get_logger(), "Some desired nodes might not be active.");
-              
-            if(manager.get(NodeName::FLIGHT) == NodeState::SUCCESS) {
-              RCLCPP_INFO(this->get_logger(), "Command FLIGHT to IDLE.");
-              publishMissionCommand(NodeName::FLIGHT, NodeState::IDLE);
-              
-              RCLCPP_INFO(this->get_logger(), "Sending activation command to TARGET.");
-              publishMissionCommand(NodeName::TARGET, NodeState::BUSY, MissionMode::DROP);
-              RCLCPP_INFO(this->get_logger(), "Sending activation command to GRIPPER.");
-              publishMissionCommand(NodeName::GRIPPER, NodeState::BUSY, MissionMode::DROP);
-              RCLCPP_INFO(this->get_logger(), "Sending activation command to YOLO.");
-              publishMissionCommand(NodeName::YOLO, NodeState::BUSY);
-              
-              mission_mode = MissionMode::DROP;
-              RCLCPP_INFO(this->get_logger(), "MissionMode: Drop");
+              exitINVERSE_WP_FLIGHT();
+              enterDROP();
             }
             break;
           
@@ -253,22 +217,10 @@ class Mission : public rclcpp::Node {
                 RCLCPP_WARN(this->get_logger(), "Some desired nodes might not be active.");
           
             if(manager.get(NodeName::TARGET) == NodeState::SUCCESS &&
-               manager.get(NodeName::GRIPPER) == NodeState::SUCCESS)
+               manager.get(NodeName::GRIPPER) == NodeState::SUCCESS || manager.get(NodeName::GRIPPER) == NodeState::BUSY)
             {
-              RCLCPP_INFO(this->get_logger(), "Command TARGET to IDLE.");
-              publishMissionCommand(NodeName::TARGET, NodeState::IDLE);
-              RCLCPP_INFO(this->get_logger(), "Command GRIPPER to IDLE.");
-              publishMissionCommand(NodeName::GRIPPER, NodeState::IDLE);
-              RCLCPP_INFO(this->get_logger(), "Command YOLO to IDLE.");
-              publishMissionCommand(NodeName::YOLO, NodeState::IDLE);
-          
-              RCLCPP_INFO(this->get_logger(), "Sending activation command to TARGET.");
-              publishMissionCommand(NodeName::TARGET, NodeState::BUSY, MissionMode::LANDING);
-              RCLCPP_INFO(this->get_logger(), "Sending activation command to MARKER.");
-              publishMissionCommand(NodeName::MARKER, NodeState::BUSY);
-              
-              mission_mode = MissionMode::LANDING;
-              RCLCPP_INFO(this->get_logger(), "MissionMode: Landing");
+              exitDROP();
+              enterLANDING();
             }
             break;
           
@@ -280,12 +232,8 @@ class Mission : public rclcpp::Node {
               RCLCPP_WARN(this->get_logger(), "Some desired nodes might not be active.");
           
             if(manager.get(NodeName::TARGET) == NodeState::SUCCESS) {
-              RCLCPP_INFO(this->get_logger(), "Command MARKER to IDLE.");
-              publishMissionCommand(NodeName::MARKER, NodeState::IDLE);
-              RCLCPP_INFO(this->get_logger(), "Command TARGET to IDLE.");
-              publishMissionCommand(NodeName::TARGET, NodeState::IDLE);
-              mission_mode = MissionMode::FINISHED;
-              RCLCPP_INFO(this->get_logger(), "MissionMode: Finished");
+              exitLANDING();
+              enterFINISHED();
             }
             break;
 
@@ -360,7 +308,116 @@ class Mission : public rclcpp::Node {
     bool nodeTest(NodeName node, NodeState state = NodeState::IDLE);
     
     float nan = std::numeric_limits<float>::quiet_NaN();
+    
+    //state functions
+    void enterWP_FLIGHT();
+    void exitWP_FLIGHT();
+    
+    void enterRESCUE();
+    void exitRESCUE();
+    
+    void enterINVERSE_WP_FLIGHT();
+    void exitINVERSE_WP_FLIGHT();
+    
+    void enterDROP();
+    void exitDROP();
+    
+    void enterLANDING();
+    void exitLANDING();
+    
+    void enterFINISHED();
 };
+
+
+void Mission::enterWP_FLIGHT() {
+  RCLCPP_INFO(this->get_logger(), "Sending activation command to FLIGHT.");
+  publishMissionCommand(NodeName::FLIGHT, NodeState::BUSY, MissionMode::WP_FLIGHT);
+  
+  mission_mode = MissionMode::WP_FLIGHT;
+  RCLCPP_INFO(this->get_logger(), "MissionMode: Waypoint Flight");          
+}
+void Mission::exitWP_FLIGHT() {
+  RCLCPP_INFO(this->get_logger(), "Command FLIGHT to IDLE.");
+  publishMissionCommand(NodeName::FLIGHT, NodeState::IDLE);
+}
+
+
+void Mission::enterRESCUE() {
+  RCLCPP_INFO(this->get_logger(), "Sending activation command to TARGET.");
+  publishMissionCommand(NodeName::TARGET, NodeState::BUSY, MissionMode::RESCUE);
+  RCLCPP_INFO(this->get_logger(), "Sending activation command to GRIPPER.");
+  publishMissionCommand(NodeName::GRIPPER, NodeState::BUSY, MissionMode::RESCUE);
+  RCLCPP_INFO(this->get_logger(), "Sending activation command to YOLO.");
+  publishMissionCommand(NodeName::YOLO, NodeState::BUSY);
+              
+  mission_mode = MissionMode::RESCUE;
+  RCLCPP_INFO(this->get_logger(), "MissionMode: Rescue");
+}
+void Mission::exitRESCUE() {
+  RCLCPP_INFO(this->get_logger(), "Command TARGET to IDLE.");
+  publishMissionCommand(NodeName::TARGET, NodeState::IDLE);
+  RCLCPP_INFO(this->get_logger(), "Command GRIPPER to IDLE.");
+  publishMissionCommand(NodeName::GRIPPER, NodeState::IDLE);
+  RCLCPP_INFO(this->get_logger(), "Command YOLO to IDLE.");
+  publishMissionCommand(NodeName::YOLO, NodeState::IDLE);
+}
+
+
+void Mission::enterINVERSE_WP_FLIGHT() {
+  RCLCPP_INFO(this->get_logger(), "Sending activation command to FLIGHT.");
+  publishMissionCommand(NodeName::FLIGHT, NodeState::BUSY, MissionMode::INVERSE_WP_FLIGHT);
+  
+  mission_mode = MissionMode::INVERSE_WP_FLIGHT;
+  RCLCPP_INFO(this->get_logger(), "MissionMode: Inverse Waypoint Flight.");
+}
+void Mission::exitINVERSE_WP_FLIGHT() {
+  RCLCPP_INFO(this->get_logger(), "Command FLIGHT to IDLE.");
+  publishMissionCommand(NodeName::FLIGHT, NodeState::IDLE);
+}
+
+
+void Mission::enterDROP() {
+  RCLCPP_INFO(this->get_logger(), "Sending activation command to TARGET.");
+  publishMissionCommand(NodeName::TARGET, NodeState::BUSY, MissionMode::DROP);
+  RCLCPP_INFO(this->get_logger(), "Sending activation command to GRIPPER.");
+  publishMissionCommand(NodeName::GRIPPER, NodeState::BUSY, MissionMode::DROP);
+  RCLCPP_INFO(this->get_logger(), "Sending activation command to YOLO.");
+  publishMissionCommand(NodeName::YOLO, NodeState::BUSY);
+              
+  mission_mode = MissionMode::DROP;
+  RCLCPP_INFO(this->get_logger(), "MissionMode: Drop");
+}
+void Mission::exitDROP() {
+  RCLCPP_INFO(this->get_logger(), "Command TARGET to IDLE.");
+  publishMissionCommand(NodeName::TARGET, NodeState::IDLE);
+  RCLCPP_INFO(this->get_logger(), "Command GRIPPER to IDLE.");
+  publishMissionCommand(NodeName::GRIPPER, NodeState::IDLE);
+  RCLCPP_INFO(this->get_logger(), "Command YOLO to IDLE.");
+  publishMissionCommand(NodeName::YOLO, NodeState::IDLE);
+}
+
+
+void Mission::enterLANDING() {
+  RCLCPP_INFO(this->get_logger(), "Sending activation command to TARGET.");
+  publishMissionCommand(NodeName::TARGET, NodeState::BUSY, MissionMode::LANDING);
+  RCLCPP_INFO(this->get_logger(), "Sending activation command to MARKER.");
+  publishMissionCommand(NodeName::MARKER, NodeState::BUSY);
+
+  mission_mode = MissionMode::LANDING;
+  RCLCPP_INFO(this->get_logger(), "MissionMode: Landing");
+}
+void Mission::exitLANDING() {
+  RCLCPP_INFO(this->get_logger(), "Command MARKER to IDLE.");
+  publishMissionCommand(NodeName::MARKER, NodeState::IDLE);
+  RCLCPP_INFO(this->get_logger(), "Command TARGET to IDLE.");
+  publishMissionCommand(NodeName::TARGET, NodeState::IDLE);
+}
+
+
+void Mission::enterFINISHED() {
+  mission_mode = MissionMode::FINISHED;
+  RCLCPP_INFO(this->get_logger(), "MissionMode: Finished");
+}
 
 
 bool Mission::skipStatusEval(NodeName node) {
@@ -428,6 +485,10 @@ void Mission::publishMissionSummary() {
 }
 
 void Mission::publishMissionCommand(NodeName node, NodeState state) {
+  std::string node_str = manager.get_node_str(node);
+  std::string state_str = manager.get_state_str(state);
+  
+  RCLCPP_INFO(this->get_logger(), "Command %s to %s", node_str.c_str(), state_str.c_str());
   std_msgs::msg::UInt32 msg;
   msg.data = manager.pack(node, state, mission_mode);
   mission_command_publisher -> publish(msg);
@@ -457,28 +518,28 @@ bool Mission::nodeTest(NodeName node, NodeState state) {
 }
 
 bool Mission::allGo() {  
-  RCLCPP_WARN(this->get_logger(), "Starting pre-mission test for MISSION");
+  RCLCPP_INFO(this->get_logger(), "Starting pre-mission test for MISSION");
   if(!nodeTest(NodeName::MISSION, NodeState::BUSY)) return false;
   
-  RCLCPP_WARN(this->get_logger(), "Starting pre-mission test for FLIGHT");
+  RCLCPP_INFO(this->get_logger(), "Starting pre-mission test for FLIGHT");
   if(!nodeTest(NodeName::FLIGHT, NodeState::IDLE)) return false;
   
-  RCLCPP_WARN(this->get_logger(), "Starting pre-mission test for TARGET");
+  RCLCPP_INFO(this->get_logger(), "Starting pre-mission test for TARGET");
   if(!nodeTest(NodeName::TARGET, NodeState::IDLE)) return false;
   
-  RCLCPP_WARN(this->get_logger(), "Starting pre-mission test for GRIPPER");
+  RCLCPP_INFO(this->get_logger(), "Starting pre-mission test for GRIPPER");
   if(!nodeTest(NodeName::GRIPPER, NodeState::IDLE)) return false;
   
-  RCLCPP_WARN(this->get_logger(), "Starting pre-mission test for VISION");
+  RCLCPP_INFO(this->get_logger(), "Starting pre-mission test for VISION");
   if(!nodeTest(NodeName::VISION, NodeState::BUSY)) return false;
   
-  RCLCPP_WARN(this->get_logger(), "Starting pre-mission test for MARKER");
+  RCLCPP_INFO(this->get_logger(), "Starting pre-mission test for MARKER");
   if(!nodeTest(NodeName::MARKER, NodeState::IDLE)) return false;
 
-  RCLCPP_WARN(this->get_logger(), "Starting pre-mission test for YOLO");
+  RCLCPP_INFO(this->get_logger(), "Starting pre-mission test for YOLO");
   if(!nodeTest(NodeName::YOLO, NodeState::IDLE)) return false;
 
-  RCLCPP_WARN(this->get_logger(), "Starting pre-mission test for LOGGER");
+  RCLCPP_INFO(this->get_logger(), "Starting pre-mission test for LOGGER");
   if(!nodeTest(NodeName::LOGGER, NodeState::BUSY)) return false;
     
   return true;

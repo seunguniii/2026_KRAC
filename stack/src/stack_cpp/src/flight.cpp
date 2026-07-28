@@ -76,7 +76,7 @@ class Flight : public rclcpp::Node {
     float front_yaw = 0.0; //deg
     float back_yaw = 0.0; //deg
     float correction_weight = 0.001;
-    float horizon_scale = 1.0;
+    float horizon_scale = 0.5;
     
     rclcpp::TimerBase::SharedPtr timer_;
     std::atomic<uint64_t> timestamp_;
@@ -177,8 +177,8 @@ void Flight::getParameters() {
   declare_parameter<float>("trajectory_correction_weight", 0.001);
   get_parameter("trajectory_correction_weight", correction_weight);
   
-  declare_parameter<float>("horizon_scale", 1.0);
-  get_parameter("horizon_scale", horizon_scale);
+  declare_parameter<float>("trajectory_horizon_scale", 0.5);
+  get_parameter("trajectory_horizon_scale", horizon_scale);
 }
 
 
@@ -313,7 +313,13 @@ void Flight::flight() {
     
     case FIXED_WING: {
       index_step = indexStep();
-      
+      Eigen::Vector3f new_target = {
+        setpoints_[sp_idx_ + index_step][0],
+        setpoints_[sp_idx_ + index_step][1],
+        setpoints_[sp_idx_ + index_step][2]
+      };
+
+      //Eigen::Vector3f trajectory_segment = (new_target - target).normalized();
       Eigen::Vector3f trajectory_segment = (target - old_target).normalized();
       msg.velocity = {
         (cruise_speed - e)*trajectory_segment.x() + e*to_sp.x(),
@@ -324,13 +330,14 @@ void Flight::flight() {
       if (passedSetpoint(
         old_target[0], old_target[1], 
         target[0], target[1], 
+        //new_target[0], new_target[1],
         curr_p[0], curr_p[1]
       )) {
         old_target = target;
         sp_idx_ += index_step;
         index_step = 1;
         
-        if(sp_idx_ >= setpoints_.size()) {
+        if(sp_idx_ >= setpoints_.size() - 1) {
           holding_last_sp_ = true;
           transition(MULTIROTOR);
         }
@@ -377,9 +384,10 @@ bool Flight::passedSetpoint(float x1, float y1, float x2, float y2, float x_curr
   
   float inner_product = trajectory_vector[0]*current_pos_vector[0] + trajectory_vector[1]*current_pos_vector[1];
   
-  float segment_length = trajectory_vector[0]*trajectory_vector[0] + trajectory_vector[1]*trajectory_vector[1];
+  float segment_length_squared = trajectory_vector[0]*trajectory_vector[0] + trajectory_vector[1]*trajectory_vector[1];
   
-  return inner_product > segment_length;
+  //return inner_product > 0; //new target
+  return inner_product > segment_length_squared/horizon_scale; //old target
 }
 
 
