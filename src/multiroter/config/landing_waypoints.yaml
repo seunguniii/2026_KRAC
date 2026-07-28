@@ -1,0 +1,77 @@
+# 착륙 전 접근 비행 + 정밀 착륙 (land_test)
+#
+# 최상위 키는 "노드 이름"이다. land_test.cpp 의 Node("land_test") 와 같아야
+# 파라미터가 먹는다. 노드 이름을 바꾸면 이 키도 같이 바꿔야 한다.
+#
+# 좌표: [forward, right, alt] 를 3 개씩 평탄하게 나열한다.
+#   forward / right : 노드가 시작한 시점의 기체 위치와 기수 방향(FRD) 기준 [m]
+#                     -> (0, 0, *) 이면 출발한 자리
+#                     -> right 가 음수면 왼쪽
+#   alt             : EKF 원점(= 이륙 지점) 기준 고도, 위쪽이 양수 [m]
+#                     -> 절대 고도라 "5 m 상공"이 언제나 같은 높이
+#                     -> waypoint_flight / mission_waypoints.yaml 과 같은 기준
+#
+# 값에는 반드시 소수점을 붙인다. 정수와 소수를 섞으면 ROS YAML 파서가 거부한다.
+#
+# 실행:
+#   ros2 run multirotor land_test --ros-args \
+#     --params-file src/multiroter/config/landing_waypoints.yaml
+
+land_test:
+  ros__parameters:
+    start_param: 1          # 1 = 접근 비행 후 착륙 (0 = 즉시 착륙)
+    land_param: 1           # 1 = x/y/z 전부 속도 제어
+
+    # ---- 접근 경로 ----
+    # 1~6 번: 시작 지점 기준 사각 스윕. 첫 웨이포인트가 (0, 0, 5) 라서
+    # 제자리 수직 상승으로 시작한다. 처음부터 대각선으로 가지 않으므로 급기동이 없다.
+    # 7 번: 인계 복귀 후 출발 지점 상공 10 m 로 올라간 뒤 착륙 시퀀스로 넘어간다.
+    waypoints: [
+       0.0,  0.0,  5.0,   # 1) 제자리에서 5 m 상승
+       0.0,  3.0,  5.0,   # 2) 우측 3 m
+       6.0,  3.0,  5.0,   # 3) 전방 6 m
+       6.0, -3.0,  5.0,   # 4) 좌측 6 m
+       0.0, -3.0,  5.0,   # 5) 후방 6 m
+       3.0,  0.0,  5.0,   # 6) 중앙 복귀  <- 여기서 POSITION 인계
+       0.0, -3.0,  5.0,
+       0.0, -3.0, 7.0,   # 7) 출발 지점 상공 7 m -> 착륙 시퀀스
+    ]
+
+    # ---- 중간 인계 ----
+    # 6 번 웨이포인트를 찍으면 PX4 를 POSITION 모드로 넘기고 대기한다.
+    # 실행 터미널에서 'y' 를 누르면 OFFBOARD 로 복귀해 7 번부터 잇는다.
+    # (stdin 이 터미널이 아니면: ros2 param set /land_test resume true)
+    pause_after_wp: 6
+    pause_timeout_s: 0.0    # 0 = 키를 누를 때까지 무한 대기. 조종권을 뺏지 않는다.
+
+    # ---- 기수 ----
+    # 진행 방향(현재 leg 의 방향)으로 기수를 돌리면서 이동한다.
+    #
+    # 이륙/상승 구간(1 번 웨이포인트)에서는 yaw 를 아예 명령하지 않는다.
+    # "현재 기수를 유지하라" 는 명령조차 보내지 않고 NaN 을 흘려서 PX4 가
+    # 기수를 그대로 두게 한다. 상승이 끝나고 첫 수평 leg(2 번)부터 그때의
+    # 실제 기수에서 출발해 경로 방향으로 돌린다.
+    #
+    # false 면 비행 내내 yaw 를 건드리지 않는다.
+    align_yaw_to_path: true
+    yaw_rate_dps:      45.0   # 회전 속도 상한 [deg/s]
+    yaw_min_leg_m:      0.5   # 수평 길이가 이보다 짧은 leg 는 방향이 없다고 봄
+
+    # ---- 접근 비행 ----
+    min_alt_m_:         1.0   # 접근 구간 최저 고도 가드 [m]
+    wp_reach_m_:        0.5   # 도달 판정 반경 [m]
+    wp_hold_cycles_:   20     # 반경 안에서 유지할 사이클 수 (10 Hz -> 2 s)
+
+    cruise_speed_mps_:  1.2   # 수평 [m/s]
+    climb_speed_mps_:   0.5   # 상승 [m/s]
+    descend_speed_mps_: 0.5   # 하강 [m/s]
+    max_lead_m_:        2.5   # setpoint 가 기체보다 앞설 수 있는 최대 거리 [m]
+
+    # ---- 정밀 착륙 ----
+    tol_m_:            0.8    # 정렬 판정 [m]
+    align_need_:       5      # 하강 시작 전 연속 정렬 사이클
+    max_xy_:           0.4    # 수평 접근 속도 상한 [m/s]
+    lost_abort_:     700      # 타겟 상실 허용 사이클 (10 Hz -> 70 s)
+    setpoint_timeout_s_: 0.3  # 비전 setpoint 신선도 [s]
+
+    exit_when_done: true      # 미션 루프용: 끝나면 프로세스 종료

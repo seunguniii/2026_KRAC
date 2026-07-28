@@ -1,0 +1,33 @@
+# config/waypoints.yaml
+#
+# Run without launch:
+#   ros2 run multirotor gps_test --ros-args --params-file config/waypoints.yaml
+#
+# Node name must match rclcpp::Node ctor -> "flight"
+#
+# Default PX4 SITL home (gz_x500) is Zurich Irchel Park:
+#   lat 47.397742   lon 8.545594   alt ~488 m AMSL
+# The waypoints below sit on top of that, so this works in SITL out of the box.
+#
+# waypoints : flat [lat, lon, alt, ...]
+#   alt is RELATIVE to the EKF origin (takeoff) unless waypoint_alt_is_amsl=true.
+
+flight:
+  ros__parameters:
+
+    waypoint_alt_is_amsl: false
+
+    # square box at 5 m, then climb to 8 m, over the SITL home point
+    waypoints: [
+      47.397971,  8.546163,  5.0,   
+      47.398244,  8.546139,  5.0,  
+      47.398238,  8.545716,  5.0,   
+      47.397930,  8.545716,  5.0,   
+      47.397971,  8.546163,  5.0,   
+      47.397971,  8.546163,  1.0,
+    ]
+
+    accept_radius: 1.0     # m
+    hold_time:     2.0     # s
+    max_wp_range:  200.0   # m
+    min_agl:       0.5     # m
