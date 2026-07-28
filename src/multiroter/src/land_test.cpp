@@ -79,7 +79,7 @@ public:
       });
 
     desired_setpoint_sub_ = this->create_subscription<geometry_msgs::msg::PointStamped>(
-      "/aruco/coordinates",
+      "/landing/coordinates",
       10,
       [this](const geometry_msgs::msg::PointStamped::SharedPtr msg) {
         desired_x_ = msg->point.x;   // right(+), [m]
@@ -435,7 +435,7 @@ void LandingTest::declare_parameters() {
 
   // Vision setpoint older than this (seconds) is treated as lost. Keep it above
   // the vision publish period so normal message gaps do not flap valid/invalid.
-  this->declare_parameter<float>("setpoint_timeout_s_", 0.3f);
+  this->declare_parameter<float>("setpoint_timeout_s_", 0.5f);
 
   // Speed slew limits [m/s per cycle]. 0.05 per 0.1 s cycle = 0.5 m/s^2.
   // vz 만 제한하고 수평을 열어두면, 모드 전환이나 비전 측정 튐에서 한 사이클
