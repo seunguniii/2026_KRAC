@@ -149,12 +149,19 @@ class Mission : public rclcpp::Node {
               publishMissionCommand(NodeName::VISION, NodeState::BUSY);
             }
             
-            if(allGo()) {
+            if(!all_go) {
+              if(!allGo()) break;
+              all_go = true;
+            }
+            
+            if(!init_mission) {
               RCLCPP_WARN(this->get_logger(), "All green. Proceeding mission.");
               RCLCPP_INFO(this->get_logger(), "Configure gimbal control to offboard.");
               //TODO: find appropriate sysid/compid for actual aircraft
               publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_GIMBAL_MANAGER_CONFIGURE, 1, 1);
+              init_mission = true;
             }
+            
             if(!armed){
               this->publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1, 6);
               arm();
@@ -280,6 +287,7 @@ class Mission : public rclcpp::Node {
     
     bool has_odom = false;
     bool all_go = false;
+    bool init_mission = false;
 
     void publishMissionSummary();
     void publishMissionCommand(NodeName node, NodeState state);
