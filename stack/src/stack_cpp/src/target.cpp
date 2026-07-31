@@ -51,6 +51,11 @@ class Target : public rclcpp::Node {
           NodeState command_state = manager.get_command(cmd);
           if(self_state != command_state) {
             self_state = command_state;
+            if(command_state == NodeState::IDLE){
+               need_init = true;
+               nav_land_sent_ = false;
+               hold_counter_ = 0;
+            }
             RCLCPP_INFO(get_logger(), "Command recieved from MISSION.");
           }
         });
@@ -70,6 +75,17 @@ class Target : public rclcpp::Node {
           acc_alt_ = msg->z;     // up(+), [m]
           desired_yaw_ = msg->w; // use for RESCUE
         });
+        
+      yolo_subscriber = this->create_subscription<Quaternion>(
+        "/nodes/yolo/target",
+        10,
+        [this](const Quaternion::SharedPtr msg) {
+          desired_x_ = msg->x;   // right(+), [m]
+          desired_y_ = msg->y;   // forward(+), [m]
+          acc_alt_ = msg->z;     // up(+), [m]
+          desired_yaw_ = 0; //msg->w; // use for RESCUE
+        });
+
 
       declare_parameters();
 
@@ -101,6 +117,7 @@ class Target : public rclcpp::Node {
     rclcpp::Subscription<UInt32>::SharedPtr command_subscriber;
     rclcpp::Subscription<VehicleOdometry>::SharedPtr odometry_subscriber;
     rclcpp::Subscription<geometry_msgs::msg::Quaternion>::SharedPtr target_subscriber;
+    rclcpp::Subscription<geometry_msgs::msg::Quaternion>::SharedPtr yolo_subscriber;
 
   
     VehicleOdometry curr_odom_;
@@ -144,7 +161,7 @@ class Target : public rclcpp::Node {
     float descent_mid_mps_ = 0.30f;
     float descent_low_mps_ = 0.20f;
 
-    float low_enough_ = 1.5f; //up (+), [m]
+    float low_enough_ = 0.7f; //up (+), [m]
 
     bool use_q_inverse_ = false;
 
@@ -173,6 +190,8 @@ class Target : public rclcpp::Node {
     NodeState self_state = NodeState::IDLE;
     MissionMode mission_mode = MissionMode::IDLE;
     void reportNodeStatus(NodeState state);
+    
+    float init_distance_threshold = 0.3; //m
 };
 
 void Target::reportNodeStatus(NodeState state) {
@@ -279,18 +298,12 @@ void Target::read_parameters() {
 // mode.publish_trajectory_stepoint();
 
 void Target::timer_callback() {
-  switch(mission_mode){
-    case MissionMode::LANDING:
-      land();
-      break;
-      
-    case MissionMode::RESCUE:
-    case MissionMode::DROP:
-      self_state = NodeState::SUCCESS;
-    default:
-      break;
-  }
   offboard_setpoint_counter_++;
+  
+  if(self_state == NodeState::IDLE ||
+     self_state == NodeState::SUCCESS ||
+     self_state == NodeState::ABORT) return;
+  land();
 }
 
 
@@ -333,20 +346,36 @@ Eigen::Vector3f Target::body_frd_to_ned(const Eigen::Vector3f &body_frd) const {
 void Target::land() {
   TrajectorySetpoint msg;
   
-  const float alt_m = -acc_alt_;
+  const float alt_m = acc_alt_;
+  Eigen::Vector3f target;
+  Eigen::Vector3f curr_p(curr_odom_.position[0], curr_odom_.position[1], curr_odom_.position[2]);
   
+  //TODO: parameterize initial coordinates for these mission modes
   if(need_init){
-    if(curr_odom_.position[2] > -10.0) {
+    switch(mission_mode){
+      case MissionMode::RESCUE:
+        target = {0.0, -20.0, -8.0};
+        break;
+      case MissionMode::DROP:
+        target = {0.0, 20.0, -8.0};
+        break;
+      case MissionMode::LANDING:
+        target = {0.0, 0.0, -8.0};
+        break;
+      default:
+        self_state = NodeState::ABORT;
+        break;
+    }    
+    Eigen::Vector3f to_sp = target - curr_p;
+    float dist_to_sp = to_sp.norm();
+    if(acc_alt_ < 8.0 && dist_to_sp < init_distance_threshold)
       need_init = false;
-      return;
-    }
     
-    msg.velocity = {0.0, 0.0, descent_high_mps_};
+    msg.position = {target[0], target[1], target[2]};
     msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
     trajectory_setpoint_publisher->publish(msg);
     return;
   }
-
 
   const bool valid_xy =
     std::isfinite(desired_x_) &&
@@ -365,7 +394,7 @@ void Target::land() {
     hold_counter_ = aligned ? hold_counter_ + 1 : 0;
   }
 
-  if (lost_count_ > lost_abort_) {
+  if (lost_count_ > lost_abort_ && self_state != NodeState::SUCCESS) {
     //TODO: suggestion; land at current position?
     RCLCPP_WARN(
       this->get_logger(),

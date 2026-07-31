@@ -258,7 +258,6 @@ void Flight::flight() {
   TrajectorySetpoint msg {};
 
   Eigen::Vector3f curr_p(curr_odom_.position[0], curr_odom_.position[1], curr_odom_.position[2]);
-  Eigen::Vector3f curr_v(curr_odom_.velocity[0], curr_odom_.velocity[1], curr_odom_.velocity[2]);
   
   std::array<float,3> target_sp = holding_last_sp_? hold_position_ : setpoints_[sp_idx_];
   
