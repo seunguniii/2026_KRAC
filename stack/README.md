@@ -38,7 +38,7 @@ $ ros2 launch mission_launch mission.launch.py
 2. Start the Mission GUI.
 
 '''bash
-$ ros2 run stack_py mission_gui
+$ ros2 run mission_gui mission_gui
 '''
 
 3. Press **S** in the Mission GUI to start the mission
