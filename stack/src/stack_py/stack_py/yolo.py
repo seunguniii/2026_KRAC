@@ -1,9 +1,13 @@
 import time
-import struct
+import math
 import numpy as np
 import cv2
+import torch
+import os
 
 from typing import Optional, Tuple
+
+from ultralytics import YOLO as YOLOModel
 
 import rclpy
 from rclpy.node import Node
@@ -11,7 +15,7 @@ from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDur
 
 from std_msgs.msg import UInt32
 from geometry_msgs.msg import Quaternion
-from sensor_msgs.msg import CompressedImage, PointCloud2
+from sensor_msgs.msg import CompressedImage
 from cv_bridge import CvBridge, CvBridgeError
 
 from px4_msgs.msg import DistanceSensor
@@ -23,23 +27,8 @@ from .mission_manager import (
     NodeState,
 )
 
-#Deleted odom_callback's vehicle attitude-camera correction
-#as the actual aircraft will use a gimbal
-#TODO: Current marker detection rate is unreliable
-#      (evaluation done in Gazebo Harmonic @ altitude < 15m)
-#      Inaccurate camera matrix might've been the cause:
-#      need evaluation of marker detection rate with an actual camera
-#      & a logic fix if needed.
-#
-#      Suggestion
-#      Add camera zoom for higher altitudes
-class YOLO(Node):
-    _ARUCO_DICT = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
-    try:
-        _ARUCO_PARAMS = cv2.aruco.DetectorParameters()
-    except AttributeError:
-        _ARUCO_PARAMS = cv2.aruco.DetectorParameters_create()
 
+class YOLO(Node):
     #TODO: find values for the actual aircraft
     _CAMERA_MATRIX = np.array(
         [[827.99145461, 0.0, 249.63373237],
@@ -55,6 +44,17 @@ class YOLO(Node):
 
         self._bridge = CvBridge()
 
+        model_path = os.path.expanduser("~/2026_KRAC/stack/src/stack_py/resource/yolo.pt")
+        self.model = YOLOModel(model_path)
+        self.image_size = 480
+        self.confidence_threshold = 0.35
+        if torch.cuda.is_available():
+            self.device = "0"
+            self.get_logger().warn("CUDA-supported GPU found.")
+        else:
+            self.device = "cpu"
+            self.get_logger().warn("No CUDA-supported GPU found. Fall back to CPU.")
+
         self.status_publisher = self.create_publisher(UInt32, '/nodes/yolo/status', 10)
         self.target_publisher = self.create_publisher(Quaternion, '/nodes/yolo/target', 10)
         self.stream_publisher = self.create_publisher(CompressedImage, '/nodes/yolo/stream', 10)
@@ -62,6 +62,7 @@ class YOLO(Node):
         self.stream_subscriber = self.create_subscription(
             CompressedImage, '/nodes/vision/stream', self.stream_callback, 10
         )
+        
         self.command_subscriber = self.create_subscription(
             UInt32, '/mission/command', self.command_callback, 10
         )
@@ -80,10 +81,9 @@ class YOLO(Node):
             qos_profile_sub
         )
     
-        #do NOT use 0, will cause division-by-0 error
         self._altitude = 1.0 
 
-        #TODO: tune values for actual aircraft
+        # TODO: tune values for actual aircraft
         FPS = 30
         self._target_kf = TargetKalman2D(
             process_var=0.01, 
@@ -99,10 +99,8 @@ class YOLO(Node):
         
         self.timer = self.create_timer(1.0/FPS, self.report_status)
 
-
     def _lidar_cb(self, msg) -> None:
         self._altitude = msg.current_distance
-
 
     def command_callback(self, msg):
         cmd = msg.data
@@ -117,55 +115,85 @@ class YOLO(Node):
             if self.self_state == NodeState.IDLE:
                 self._target_kf.reset()
 
-
     def report_status(self) -> None:
         msg = UInt32()
         msg.data = self.mm.pack(NodeName.YOLO, self.self_state)
         self.status_publisher.publish(msg)
 
-
-    #main logic
     def stream_callback(self, msg: CompressedImage) -> None:
         if self.self_state != NodeState.BUSY:
             return
 
         try:
-            frame = self._bridge.compressed_imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            np_arr = np.frombuffer(msg.data, np.uint8)
+            frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            
+            if frame is None:
+                self.get_logger().error('Failed to decode image buffer via cv2.imdecode')
+                return
+                
             self._process_frame(frame)
-        except CvBridgeError as e:
-            self.get_logger().error(f'Failed to decode compressed image: {e}')
-
+        except Exception as e:
+            self.get_logger().error(f'Failed to process stream: {e}')
 
     def _process_frame(self, frame: np.ndarray) -> None:
-        detection = self._detect_first_tag(frame)
         z = self._altitude 
-    
+        
         height, width = frame.shape[:2]
-        center_x, center_y = width // 2, height // 2
+        center_x = width*0.5
+        center_y = height*0.5
         fx, fy = self._CAMERA_MATRIX[0, 0], self._CAMERA_MATRIX[1, 1]
 
         cv2.drawMarker(
-            frame, (center_x, center_y), 
+            frame, (int(center_x), int(center_y)), 
             (255, 0, 0), cv2.MARKER_CROSS, 20, 2
         )
 
-        if detection is not None and z > 0.05:
-            cx, cy, yaw_deg = detection
+        try:
+            results = self.model(
+                frame,
+                imgsz=self.image_size,
+                conf=self.confidence_threshold,
+                device=self.device,
+                verbose=False,
+            )
+        except Exception as error:
+            self.get_logger().error(f"YOLO inference failed: {error}")
+            return
+
+        obb = results[0].obb
+        detection_found = obb is not None and len(obb) > 0
+
+        target_angle_deg = float("nan")
+
+        if detection_found and z > 0.05:
+            xywhr = obb.xywhr.detach().cpu().numpy()
+            polygons = obb.xyxyxyxy.detach().cpu().numpy()
+            confidences = obb.conf.detach().cpu().numpy()
+            
+            target_index = int(np.argmax(confidences))
+
+            (cx, cy, tw, th, trad) = xywhr[target_index]
+            target_polygon = polygons[target_index].round().astype(np.int32)
+
+            target_angle_deg = self.compute_long_axis_angle_deg(target_polygon) - 90.0
             
             dx = cx - center_x
             dy = center_y - cy
+            
             raw_x_m = dx / fx * z
             raw_y_m = dy / fy * z
-    
+
             smooth_x, smooth_y = self._target_kf.update(raw_x_m, raw_y_m)
             self._last_detect_time = time.monotonic()
             
             smooth_px = int((smooth_x * fx / z) + center_x)
             smooth_py = int(center_y - (smooth_y * fy / z))
-    
+
+            cv2.polylines(frame, [target_polygon.reshape((-1, 1, 2))], isClosed=True, color=(0, 255, 0), thickness=3)
             cv2.circle(frame, (int(cx), int(cy)), 8, (0, 0, 255), -1)
             cv2.putText(
-                frame, f"RAW (Yaw: {yaw_deg:.1f}deg)", (int(cx) + 10, int(cy)), 
+                frame, "RAW", (int(cx) + 10, int(cy)), 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2
             )
 
@@ -175,8 +203,7 @@ class YOLO(Node):
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2
             )
 
-            # Pass smooth x, y, altitude z, and yaw_deg into the w parameter
-            self._publish_coordinates(smooth_x, smooth_y, z, yaw_deg)
+            self._publish_coordinates(smooth_x, smooth_y, z, target_angle_deg)
 
         else:
             now = time.monotonic()
@@ -184,75 +211,59 @@ class YOLO(Node):
                (now - self._last_detect_time <= self._target_predict_timeout)):
                 smooth_x, smooth_y = self._target_kf.predict_only()
                 
-                smooth_px = int((smooth_x * fx / z) + center_x)
-                smooth_py = int(center_y - (smooth_y * fy / z))
+                if z > 0.05:
+                    smooth_px = int((smooth_x * fx / z) + center_x)
+                    smooth_py = int(center_y - (smooth_y * fy / z))
+                    
+                    cv2.circle(frame, (smooth_px, smooth_py), 8, (0, 255, 255), -1)
+                    cv2.putText(
+                        frame, "COAST", (smooth_px + 10, smooth_py), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2
+                    )
                 
-                cv2.circle(frame, (smooth_px, smooth_py), 8, (0, 255, 255), -1)
-                cv2.putText(
-                    frame, "COAST", (smooth_px + 10, smooth_py), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2
-                )
-                
-                # Coasting state - set yaw to 0.0 or last known
-                self._publish_coordinates(smooth_x, smooth_y, z, 0.0)
+                self._publish_coordinates(smooth_x, smooth_y, z, target_angle_deg)
             else:
                 self._target_kf.reset()
                 self._publish_coordinates(float('nan'), float('nan'), z, float('nan'))
-    
+
         try:
             annotated_msg = self._bridge.cv2_to_compressed_imgmsg(frame, dst_format='jpeg')
             self.stream_publisher.publish(annotated_msg)
         except CvBridgeError as e:
             self.get_logger().error(f'Failed to encode annotated image: {e}')
-    
-    
-    def _detect_first_tag(self, frame: np.ndarray) -> Optional[Tuple[float, float, float]]:
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        corners, ids, _ = cv2.aruco.detectMarkers(
-            gray,
-            self._ARUCO_DICT,
-            parameters=self._ARUCO_PARAMS,
-        )
-        
-        if ids is not None and len(ids) > 0:
-            pts = corners[0].reshape(4, 2)
-            cx = float(np.mean(pts[:, 0]))
-            cy = float(np.mean(pts[:, 1]))
-    
-            # Top edge of the marker: from top-left (pts[0]) to top-right (pts[1])    
-            top_left = pts[0]    
-            top_right = pts[1]    
-            
-            dx = top_right[0] - top_left[0]
-            dy = top_right[1] - top_left[1]
 
-            # dx measures rightward drift, -dy measures upward drift
-            yaw_rad = np.arctan2(dx, -dy)
-            yaw_deg = float(np.degrees(yaw_rad))
-    
-            return cx, cy, yaw_deg
-            
-        return None
+    @staticmethod
+    def compute_long_axis_angle_deg(polygon: np.ndarray) -> float:
+        points = np.asarray(polygon, dtype=np.float32).reshape(4, 2)
+        edge_vectors = np.roll(points, -1, axis=0) - points
+        edge_lengths_sq = np.sum(edge_vectors * edge_vectors, axis=1)
+        longest_edge = edge_vectors[int(np.argmax(edge_lengths_sq))]
 
+        dx = float(longest_edge[0])
+        dy = float(longest_edge[1])
+
+        if dx == 0.0 and dy == 0.0:
+            return float("nan")
+
+        return math.degrees(math.atan2(dy, dx)) % 180.0
 
     def _publish_coordinates(self, x: float, y: float, z: float, w: float = 0.0):
         msg = Quaternion()
         msg.x = float(x)
         msg.y = float(y)
         msg.z = float(z)
-        msg.w = float(w)  # Stores relative yaw in degrees    
+        msg.w = float(w)
         self.target_publisher.publish(msg)
 
 
 def main(args=None):
     rclpy.init(args=args)
 
-    yolo = YOLO()
-    rclpy.spin(yolo)
+    yolo_node = YOLO()
+    rclpy.spin(yolo_node)
 
-    yolo.destroy_node()
+    yolo_node.destroy_node()
     rclpy.shutdown()
 
 if __name__ == '__main__':
-  main()
-
+    main()

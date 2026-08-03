@@ -1,13 +1,40 @@
 import os
 from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import get_package_prefix
 
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+
 
 pkg_share = get_package_share_directory("mission_launch")
 
 flight = os.path.join(pkg_share, "config", "flight.yaml")
 trajectory = os.path.join(pkg_share, "config", "trajectory.yaml")
+yolo = os.path.join(pkg_share, "config", "yolo.yaml")
+
+
+################
+#<yolo-settings>
+stack_py_prefix = get_package_prefix('stack_py')
+stack_py_site_packages = os.path.join(
+    stack_py_prefix, 'lib', 'python3.10', 'site-packages'
+)
+
+#TODO: check python version
+ros_pythonpath = '/opt/ros/humble/lib/python3.10/site-packages:/opt/ros/humble/local/lib/python3.10/dist-packages'
+current_pythonpath = os.environ.get('PYTHONPATH', '')
+full_pythonpath = f"{stack_py_site_packages}:{ros_pythonpath}:{current_pythonpath}"
+
+yolo_env = os.environ.copy()
+yolo_env['PYTHONNOUSERSITE'] = '1'
+yolo_env['PYTHONPATH'] = full_pythonpath
+
+default_yolo_venv = os.path.expanduser('~/venvs/yolo/bin/yolo')
+#</yolo-settings>
+#################
+
 
 def generate_launch_description():
     return LaunchDescription([
@@ -76,11 +103,18 @@ def generate_launch_description():
         #    emulate_tty=True
         #),
 
-        
+        DeclareLaunchArgument(
+            'yolo_venv',
+            default_value=default_yolo_venv,
+            description='YOLO venv path'
+        ),
         Node(
             package='stack_py',
             executable='yolo',
             name='yolo',
+            prefix=[LaunchConfiguration('yolo_venv')],
+            env=yolo_env,
+            #parameters = yolo,
             output='screen',
             emulate_tty=True
         ),

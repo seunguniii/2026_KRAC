@@ -191,14 +191,13 @@ class Mission : public rclcpp::Node {
             }
             else
               publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_GIMBAL_MANAGER_PITCHYAW, -90.0, 0.0, nan, nan, gimbal_device_flag);
-            //TODO:SUCCESS tags are for test/debug.
-            //     rid SUCCESS tags once node is fully implemented
+              
             if(((manager.get(NodeName::TARGET) != NodeState::BUSY) && (manager.get(NodeName::TARGET) != NodeState::SUCCESS))
                   || ((manager.get(NodeName::GRIPPER) != NodeState::BUSY) && (manager.get(NodeName::GRIPPER) == NodeState::SUCCESS))
                   || (manager.get(NodeName::YOLO) != NodeState::BUSY))
                 RCLCPP_WARN(this->get_logger(), "Some desired nodes might not be active.");
                 
-            //TODO: rid IDLE tag for GRIPPER
+
             if(manager.get(NodeName::TARGET) == NodeState::SUCCESS && manager.get(NodeName::GRIPPER) == NodeState::SUCCESS)
             {
               exitRESCUE();
@@ -217,8 +216,7 @@ class Mission : public rclcpp::Node {
             }
             break;
           
-          //TODO: SUCCESS tags are for test/debug
-          //     rid SUCCESS tags once node is fully implemented
+          
           case MissionMode::DROP:
             if(manager.get(NodeName::TARGET) == NodeState::SUCCESS) {
               if(armed && landed) disarm();
@@ -228,14 +226,16 @@ class Mission : public rclcpp::Node {
             else
               publishVehicleCommand(VehicleCommand::VEHICLE_CMD_DO_GIMBAL_MANAGER_PITCHYAW, -90.0, 0.0, nan, nan, gimbal_device_flag);
               
-            if(manager.get(NodeName::TARGET) != NodeState::BUSY || 
-               manager.get(NodeName::GRIPPER) != NodeState::BUSY || 
-               manager.get(NodeName::YOLO) != NodeState::BUSY)
+            if(((manager.get(NodeName::TARGET) != NodeState::BUSY) && (manager.get(NodeName::TARGET) != NodeState::SUCCESS))
+                  || ((manager.get(NodeName::GRIPPER) != NodeState::BUSY) && (manager.get(NodeName::GRIPPER) == NodeState::SUCCESS))
+                  || (manager.get(NodeName::YOLO) != NodeState::BUSY))
+                  || (manager.get(NodeName::MARKER) != NodeState::BUSY))
                 RCLCPP_WARN(this->get_logger(), "Some desired nodes might not be active.");
           
             if(manager.get(NodeName::TARGET) == NodeState::SUCCESS && manager.get(NodeName::GRIPPER) == NodeState::SUCCESS)
             {
               exitDROP();
+              if(!armed) arm();
               enterLANDING();
             }
             break;

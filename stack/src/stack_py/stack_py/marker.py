@@ -94,8 +94,12 @@ class Marker(Node):
         self._target_predict_timeout = 5.0
         self._last_detect_time = None
         
+        self._offset_x_m = 0.0
+        self._offset_y_m = 0.25
+        
         self.mm = MissionManager()
         self.self_state = NodeState.IDLE
+        
         
         self.timer = self.create_timer(1.0/FPS, self.report_status)
 
@@ -148,20 +152,39 @@ class Marker(Node):
             frame, (center_x, center_y), 
             (255, 0, 0), cv2.MARKER_CROSS, 20, 2
         )
+        
+        drone_center_px = int(center_x - (self._offset_x_m * fx / z))
+        drone_center_py = int(center_y + (self._offset_y_m * fy / z))
+        
+        cv2.drawMarker(
+            frame, (drone_center_px, drone_center_py), 
+            (255, 0, 255), cv2.MARKER_CROSS, 20, 2
+        )
+        cv2.putText(
+            frame, "DRONE_CENTER", (drone_center_px + 10, drone_center_py - 10), 
+            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1
+        )
 
         if tag_center is not None and z > 0.05:
             cx, cy = tag_center
             
             dx = cx - center_x
             dy = center_y - cy
-            raw_x_m = dx / fx * z
-            raw_y_m = dy / fy * z
+            
+            cam_x_m = dx / fx * z
+            cam_y_m = dy / fy * z
+            
+            raw_x_m = cam_x_m + self._offset_x_m
+            raw_y_m = cam_y_m + self._offset_y_m
 
             smooth_x, smooth_y = self._target_kf.update(raw_x_m, raw_y_m)
             self._last_detect_time = time.monotonic()
             
-            smooth_px = int((smooth_x * fx / z) + center_x)
-            smooth_py = int(center_y - (smooth_y * fy / z))
+            cam_smooth_x = smooth_x - self._offset_x_m
+            cam_smooth_y = smooth_y - self._offset_y_m
+            
+            smooth_px = int((cam_smooth_x * fx / z) + center_x)
+            smooth_py = int(center_y - (cam_smooth_y * fy / z))
 
             cv2.circle(frame, (int(cx), int(cy)), 8, (0, 0, 255), -1)
             cv2.putText(
@@ -183,8 +206,11 @@ class Marker(Node):
                (now - self._last_detect_time <= self._target_predict_timeout)):
                 smooth_x, smooth_y = self._target_kf.predict_only()
                 
-                smooth_px = int((smooth_x * fx / z) + center_x)
-                smooth_py = int(center_y - (smooth_y * fy / z))
+                cam_smooth_x = smooth_x - self._offset_x_m
+                cam_smooth_y = smooth_y - self._offset_y_m
+                
+                smooth_px = int((cam_smooth_x * fx / z) + center_x)
+                smooth_py = int(center_y - (cam_smooth_y * fy / z))
                 
                 cv2.circle(frame, (smooth_px, smooth_py), 8, (0, 255, 255), -1)
                 cv2.putText(

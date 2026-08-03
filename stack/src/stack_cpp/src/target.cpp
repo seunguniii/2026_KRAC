@@ -55,6 +55,7 @@ class Target : public rclcpp::Node {
                need_init = true;
                nav_land_sent_ = false;
                hold_counter_ = 0;
+               lost_count_ = 0;
             }
             RCLCPP_INFO(get_logger(), "Command recieved from MISSION.");
           }
@@ -102,11 +103,6 @@ class Target : public rclcpp::Node {
     }
 
   private:
-    enum LandingMode {
-      POSITION_XY_VELOCITY_Z = 0,
-      VELOCITY_XYZ = 1,
-    };
-
     rclcpp::TimerBase::SharedPtr timer_;
 
     rclcpp::Publisher<UInt32>::SharedPtr status_publisher;
@@ -141,7 +137,6 @@ class Target : public rclcpp::Node {
 
     // Parameters
     int start_mode_ = 0;
-    int land_mode_ = VELOCITY_XYZ;
 
     int lost_abort_ = 700;
     int align_need_ = 5;
@@ -200,11 +195,7 @@ void Target::reportNodeStatus(NodeState state) {
   status_publisher -> publish(msg);
 }
 
-void Target::declare_parameters() {
-  // 0: x/y position setpoint + z velocity setpoint
-  // 1: x/y/z velocity setpoint
-  this->declare_parameter<int>("land_param", VELOCITY_XYZ);
-  
+void Target::declare_parameters() {  
   this->declare_parameter<int>("lost_abort_", 700);
   this->declare_parameter<float>("max_xy_", 0.4f);
   this->declare_parameter<float>("tol_m_", 0.8f);
@@ -228,9 +219,7 @@ void Target::declare_parameters() {
 }
 
 
-void Target::read_parameters() {
-  land_mode_ = this->get_parameter("land_param").as_int();
-  
+void Target::read_parameters() {  
   lost_abort_ = this->get_parameter("lost_abort_").as_int();
   align_need_ = this->get_parameter("align_need_").as_int();
 
@@ -261,42 +250,6 @@ void Target::read_parameters() {
 }
 
 
-//TODO: add rescue/drop logics
-//
-//suggestion: planar guidance uses same logic
-//            altitude control uses different logic
-//            for an overall shorter code & avoids duplication.
-//
-//i.e.
-//
-// float target_planar_state[3];
-// float target_altitude;
-// float target_yaw;
-// target_planar_coordinate = planar_guidance(weights);
-// switch(mission_mode){
-//   case LANDING:
-//     target_altitude = land_altitude_control(); break;
-//   case RESCUE:
-//      target_altitude = rescue_altitude_control(); break;
-//   case DROP:
-//      target_altitude = drop_altitude_control(); break;
-// }
-// msg.x = target_planar_state[0];
-// msg.y = target_planar_state[1];
-// msg.z = target_altitude;
-// msg.yaw = target_planar_state[2]; <- nan for other modes, valid value for RESCUE
-// msg.timestamp = ...;
-// trajectory_setpoint_publisher -> publish(msg);
-//
-//
-//another suggestion: build different classes for different mission modes
-//
-//i.e.
-// mode = control_mode(mission_mode);
-// mode.planar_coordinate();
-// mode.altitude();
-// mode.publish_trajectory_stepoint();
-
 void Target::timer_callback() {
   offboard_setpoint_counter_++;
   
@@ -311,10 +264,10 @@ float Target::select_descent_speed(float alt_m, bool valid_xy) const {
   if (!valid_xy || hold_counter_ < align_need_)
     return 0.0f;
 
-  if (alt_m > 2.0f)
+  if (alt_m > 4.0f)
     return descent_high_mps_;
 
-  if (alt_m > 0.8f)
+  if (alt_m > 1.5f)
     return descent_mid_mps_;
 
   return descent_low_mps_;
@@ -409,70 +362,37 @@ void Target::land() {
 
   const float descent_mps = select_descent_speed(alt_m, valid_xy);
 
-  if (land_mode_ == POSITION_XY_VELOCITY_Z) {
-    Eigen::Vector3f current_ned(
-      curr_odom_.position[0],
-      curr_odom_.position[1],
-      curr_odom_.position[2]);
+  float v_forward = 0.0f;
+  float v_right = 0.0f;
+  float v_close = 0.0f;
 
-    float xy_step = 0.0f;
-    Eigen::Vector3f target_body_frd(0.0f, 0.0f, 0.0f);
+  if (valid_xy && err_dist >= deadband_m_) {
+    const float ux = ex / err_dist;  // right ratio
+    const float uy = ey / err_dist;  // forward ratio
 
-    if (valid_xy && err_dist >= deadband_m_) {
-      const float ux = ex / err_dist;  // right ratio
-      const float uy = ey / err_dist;  // forward ratio
+    v_close = max_xy_ * std::tanh(tanh_gain_ * err_dist);
+    v_close = clamp_range(v_close, tanh_min_xy_, max_xy_);
 
-      xy_step =
-        position_step_max_m_ *
-        (2.0f / static_cast<float>(M_PI)) *
-        std::atan(atan_position_gain_ * err_dist);
-
-      xy_step = clamp_range(xy_step, position_step_min_m_, position_step_max_m_);
-
-      const float step_right = xy_step * ux;
-      const float step_forward = xy_step * uy;
-
-      // BODY/FRD: x = forward, y = right, z = down
-      target_body_frd = Eigen::Vector3f(step_forward, step_right, 0.0f);
-    }
-
-    Eigen::Vector3f target_ned = current_ned + body_frd_to_ned(target_body_frd);
-
-    // x/y position-based, z velocity-based.
-    msg.position = {target_ned[0], target_ned[1], nan_};
-    msg.velocity = {nan_, nan_, descent_mps};
-  } else {
-    float v_forward = 0.0f;
-    float v_right = 0.0f;
-    float v_close = 0.0f;
-
-    if (valid_xy && err_dist >= deadband_m_) {
-      const float ux = ex / err_dist;  // right ratio
-      const float uy = ey / err_dist;  // forward ratio
-
-      v_close = max_xy_ * std::tanh(tanh_gain_ * err_dist);
-      v_close = clamp_range(v_close, tanh_min_xy_, max_xy_);
-
-      v_right = clamp_symmetric(v_close * ux, max_xy_);
-      v_forward = clamp_symmetric(v_close * uy, max_xy_);
-    }
-
-    Eigen::Vector3f v_body(v_forward, v_right, 0.0f);
-    Eigen::Vector3f v_ned = body_frd_to_ned(v_body);
-
-    // x/y/z velocity-based.
-    msg.position = {nan_, nan_, nan_};
-    msg.velocity = {v_ned[0], v_ned[1], descent_mps};
+    v_right = clamp_symmetric(v_close * ux, max_xy_);
+    v_forward = clamp_symmetric(v_close * uy, max_xy_);
   }
+
+  Eigen::Vector3f v_body(v_forward, v_right, 0.0f);
+  Eigen::Vector3f v_ned = body_frd_to_ned(v_body);
+
+  // x/y/z velocity-based.
+  msg.position = {nan_, nan_, nan_};
+  msg.velocity = {v_ned[0], v_ned[1], descent_mps};
 
   msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
   trajectory_setpoint_publisher->publish(msg);
 
-  if (
-    valid_xy &&
-    hold_counter_ >= align_need_ &&
-    acc_alt_ < low_enough_ &&
-    !nav_land_sent_) {
+  //if (
+  //  valid_xy &&
+  //  hold_counter_ >= align_need_ &&
+  //  acc_alt_ < low_enough_ &&
+  //  !nav_land_sent_) {
+  if(acc_alt_ < low_enough_ && !nav_land_sent_) {
     publish_vehicle_command(VehicleCommand::VEHICLE_CMD_NAV_LAND);
 
     RCLCPP_INFO(
