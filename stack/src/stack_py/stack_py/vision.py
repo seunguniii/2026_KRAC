@@ -17,6 +17,7 @@ from .mission_manager import (
 #      if problems such as excessive badnwith occur, 
 #      use local ports using gstreamer tee at udp port 5600 etc.
 #      ...or merge vision, marker and yolo node into a single node
+
 class Vision(Node):
   def __init__(self):
     super().__init__('vision')
@@ -106,9 +107,20 @@ class Vision(Node):
     #  "nvvidconv flip-method={flip_method} !"
     #  "video/x-raw,format=BGRx ! videoconvert ! video/x-raw,format BGR ! appsink"
     #)
+    
+    #gz
+    #pipeline = (
+    #  "udpsrc port=5600 ! "
+    #  "application/x-rtp, encoding-name=H264 ! "
+    #  "rtph264depay ! h264parse ! avdec_h264 ! "
+    #  "videoconvert ! "
+    #  "videoscale ! video/x-raw, width=1280, height=720 ! "
+    #  "appsink"
+    #)
+    
+    #gz on orin
     pipeline = (
-      "udpsrc port=5600 ! "
-      "application/x-rtp, encoding-name=H264 ! "
+      "udpsrc port=5601 caps=\"application/x-rtp, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H264\" ! "
       "rtph264depay ! h264parse ! avdec_h264 ! "
       "videoconvert ! "
       "videoscale ! video/x-raw, width=1280, height=720 ! "
