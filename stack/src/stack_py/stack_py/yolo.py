@@ -166,6 +166,23 @@ class YOLO(Node):
 
         target_angle_deg = float("nan")
 
+        target_angle_deg = float("nan")
+        target_angle_rad = float("nan")
+        target_confidence = float("nan")
+        target_size_ratio = float("nan")
+        normalized_dx = float("nan")
+        normalized_dy = float("nan")
+        raw_x_m = float("nan")
+        raw_y_m = float("nan")
+        smooth_x = float("nan")
+        smooth_y = float("nan")
+        smooth_px = float("nan")
+        smooth_py = float("nan")
+        
+        target_polygon: Optional[np.ndarray] = None
+        measured_center: Optional[Tuple[float, float]] = None
+        mode = "none"
+
         if detection_found and z > 0.05:
             xywhr = obb.xywhr.detach().cpu().numpy()
             polygons = obb.xyxyxyxy.detach().cpu().numpy()
@@ -177,31 +194,26 @@ class YOLO(Node):
             target_polygon = polygons[target_index].round().astype(np.int32)
 
             target_angle_deg = self.compute_long_axis_angle_deg(target_polygon) - 90.0
+            target_angle_rad = float(trad)
+            target_confidence = float(confidences[target_index])
+            measured_center = (float(cx), float(cy))
             
-            dx = cx - center_x
-            dy = center_y - cy
+            pixel_dx = cx - center_x
+            pixel_dy = center_y - cy
+
+            normalized_dx = pixel_dx / (width / 2.0)
+            normalized_dy = pixel_dy / (height / 2.0)
+            target_size_ratio = float(tw * th) / float(width * height)
             
-            raw_x_m = dx / fx * z
-            raw_y_m = dy / fy * z
+            raw_x_m = pixel_dx / fx * z
+            raw_y_m = pixel_dy / fy * z
 
             smooth_x, smooth_y = self._target_kf.update(raw_x_m, raw_y_m)
             self._last_detect_time = time.monotonic()
+            mode = "measurement"
             
-            smooth_px = int((smooth_x * fx / z) + center_x)
-            smooth_py = int(center_y - (smooth_y * fy / z))
-
-            cv2.polylines(frame, [target_polygon.reshape((-1, 1, 2))], isClosed=True, color=(0, 255, 0), thickness=3)
-            cv2.circle(frame, (int(cx), int(cy)), 8, (0, 0, 255), -1)
-            cv2.putText(
-                frame, "RAW", (int(cx) + 10, int(cy)), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2
-            )
-
-            cv2.circle(frame, (smooth_px, smooth_py), 8, (0, 255, 0), -1)
-            cv2.putText(
-                frame, "KF", (smooth_px + 10, smooth_py), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2
-            )
+            smooth_px = (smooth_x * fx / z) + center_x
+            smooth_py = center_y - (smooth_y * fy / z)
 
             self._publish_coordinates(smooth_x, smooth_y, z, target_angle_deg)
 
@@ -210,21 +222,94 @@ class YOLO(Node):
             if (self._last_detect_time and 
                (now - self._last_detect_time <= self._target_predict_timeout)):
                 smooth_x, smooth_y = self._target_kf.predict_only()
+                mode = "prediction"
                 
-                if z > 0.05:
-                    smooth_px = int((smooth_x * fx / z) + center_x)
-                    smooth_py = int(center_y - (smooth_y * fy / z))
-                    
-                    cv2.circle(frame, (smooth_px, smooth_py), 8, (0, 255, 255), -1)
-                    cv2.putText(
-                        frame, "COAST", (smooth_px + 10, smooth_py), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2
-                    )
+                if z > 0.05 and math.isfinite(smooth_x) and math.isfinite(smooth_y):
+                    smooth_px = (smooth_x * fx / z) + center_x
+                    smooth_py = center_y - (smooth_y * fy / z)
                 
                 self._publish_coordinates(smooth_x, smooth_y, z, target_angle_deg)
             else:
                 self._target_kf.reset()
+                mode = "none"
                 self._publish_coordinates(float('nan'), float('nan'), z, float('nan'))
+                
+                
+        cv2.drawMarker(
+            frame,
+            (int(center_x), int(center_y)),
+            (255, 0, 0),
+            markerType=cv2.MARKER_CROSS,
+            markerSize=20,
+            thickness=2,
+        )
+
+        if detection_found and target_polygon is not None and measured_center is not None:
+            target_center_x, target_center_y = measured_center
+
+            cv2.polylines(
+                frame,
+                [target_polygon.reshape((-1, 1, 2))],
+                isClosed=True,
+                color=(0, 255, 0),
+                thickness=3,
+            )
+
+            #Measured YOLO center
+            cv2.drawMarker(
+                frame,
+                (int(target_center_x), int(target_center_y)),
+                (0, 255, 0),
+                markerType=cv2.MARKER_CROSS,
+                markerSize=24,
+                thickness=2,
+            )
+
+            #Line linking image center to target center
+            cv2.line(
+                frame,
+                (int(center_x), int(center_y)),
+                (int(target_center_x), int(target_center_y)),
+                (0, 255, 255),
+                2,
+            )
+
+            #OBB Long axis line (magenta)
+            if math.isfinite(target_angle_deg):
+                axis_rad = math.radians(target_angle_deg)
+                polygon_points = target_polygon.reshape(4, 2).astype(np.float32)
+                edge_vectors = np.roll(polygon_points, -1, axis=0) - polygon_points
+                axis_half_length = 0.5 * math.sqrt(
+                    float(np.max(np.sum(edge_vectors * edge_vectors, axis=1)))
+                )
+                axis_dx = axis_half_length * math.cos(axis_rad)
+                axis_dy = axis_half_length * math.sin(axis_rad)
+
+                cv2.line(
+                    frame,
+                    (int(target_center_x - axis_dx), int(target_center_y - axis_dy)),
+                    (int(target_center_x + axis_dx), int(target_center_y + axis_dy)),
+                    (255, 0, 255),
+                    3,
+                )
+
+            status_text = "PERSON DETECTED"
+            status_color = (0, 255, 0)
+        else:
+            status_text = "PERSON NOT DETECTED"
+            status_color = (0, 0, 255)
+
+        #Predicted Kalman Center (red cross)
+        if mode == "prediction" and math.isfinite(smooth_px) and math.isfinite(smooth_py):
+            cv2.drawMarker(
+                frame,
+                (int(smooth_px), int(smooth_py)),
+                (0, 0, 255),
+                markerType=cv2.MARKER_CROSS,
+                markerSize=24,
+                thickness=2,
+            )
+                
 
         try:
             annotated_msg = self._bridge.cv2_to_compressed_imgmsg(frame, dst_format='jpeg')

@@ -229,7 +229,6 @@ class Mission : public rclcpp::Node {
             if(((manager.get(NodeName::TARGET) != NodeState::BUSY) && (manager.get(NodeName::TARGET) != NodeState::SUCCESS))
                   || ((manager.get(NodeName::GRIPPER) != NodeState::BUSY) && (manager.get(NodeName::GRIPPER) == NodeState::SUCCESS))
                   || (manager.get(NodeName::YOLO) != NodeState::BUSY))
-                  || (manager.get(NodeName::MARKER) != NodeState::BUSY))
                 RCLCPP_WARN(this->get_logger(), "Some desired nodes might not be active.");
           
             if(manager.get(NodeName::TARGET) == NodeState::SUCCESS && manager.get(NodeName::GRIPPER) == NodeState::SUCCESS)
